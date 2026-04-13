@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>aRBcalc</title>
+
+<style>
+body {
+  margin: 0;
+  font-family: sans-serif;
+  background: #0f1115;
+  color: white;
+  display: flex;
+  justify-content: center;
+}
+
+.app {
+  width: 360px;
+  padding: 20px;
+  position: relative;
+}
+
+/* === кнопка помощи === */
+.help-btn {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #2962ff;
+  border: none;
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+/* === окно инструкции === */
+.help-box {
+  position: absolute;
+  top: 55px;
+  right: 15px;
+  width: 320px;
+  background: #1a1d24;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 12px;
+  display: none;
+  line-height: 1.4;
+  z-index: 10;
+}
+
+input {
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: #1a1d24;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  color: white;
+}
+
+button {
+  width: 100%;
+  padding: 12px;
+  margin-top: 8px;
+  background: #2962ff;
+  border: none;
+  border-radius: 10px;
+  color: white;
+  cursor: pointer;
+}
+
+.small {
+  font-size: 12px;
+  padding: 8px;
+  opacity: 0.8;
+}
+
+.hidden { display: none; }
+
+.result {
+  margin-top: 15px;
+  padding: 15px;
+  background: #1a1d24;
+  border-radius: 10px;
+}
+
+/* ===== DONATE FIXED ===== */
+.donate-btn {
+  position: fixed;
+  right: 12px;
+  top: 15px;
+  width: auto;
+  padding: 6px 8px;
+  font-size: 10px;
+  background: #1a1d24;
+  border: 1px solid #2a2f3a;
+  border-radius: 999px;
+  color: #aaa;
+  cursor: pointer;
+  z-index: 1000;
+}
+
+.donate-box {
+  position: fixed;
+  right: 12px;
+  top: 55px;
+  display: none;
+  width: 260px;
+  padding: 10px;
+  background: #1a1d24;
+  border-radius: 10px;
+  font-size: 11px;
+  word-break: break-all;
+  z-index: 1000;
+}
+
+.addr {
+  color: #00e676;
+}
+</style>
+</head>
+
+<body>
+
+<div class="app">
+
+<h2>aRBcalc</h2>
+
+<!-- HELP BUTTON -->
+<button class="help-btn" onclick="toggleHelp()">?</button>
+
+<!-- HELP BOX -->
+<div class="help-box" id="helpBox">
+⚡ aRBcalc — кратко<br><br>
+
+ТВХ шорт / ТВХ лонг → вводишь цены входа<br>
+Фандинг → ± USDT выплаты<br>
+Комиссия → 0.05% по умолчанию или ручная<br>
+Рассчитать → считает всё<br><br>
+
+📊 Результат:<br>
+• Изначальный спред<br>
+• ТВХ после фандинга<br>
+• Итоговый спред<br>
+</div>
+
+<input id="short" placeholder="ТВХ шорт">
+<input id="long" placeholder="ТВХ лонг">
+
+<button onclick="toggleFunding()">Фандинг</button>
+
+<div id="fundingBlock" class="hidden">
+  <input id="qty" placeholder="Сумма токенов">
+  <input id="fundShort" placeholder="Фандинг шорт (± USDT)">
+  <input id="fundLong" placeholder="Фандинг лонг (± USDT)">
+</div>
+
+<button class="small" onclick="toggleFee()">
+Комиссия (0.05% по умолчанию)
+</button>
+
+<div id="feeBlock" class="hidden">
+  <input id="feeShort" placeholder="Комиссия шорт %" value="0.05">
+  <input id="feeLong" placeholder="Комиссия лонг %" value="0.05">
+</div>
+
+<button onclick="calc()">Рассчитать</button>
+
+<div class="result" id="res">—</div>
+
+</div>
+
+<!-- ===== DONATE ===== -->
+<button class="donate-btn" onclick="toggleDonate()">🙏Благодырь</button>
+
+<div class="donate-box" id="donateBox">
+  <div><b>EVM:</b></div>
+  <div class="addr">0x6b6855d93c1905261d469cff8a81e1a5f374a434</div>
+
+  <br>
+
+  <div><b>SOLANA:</b></div>
+  <div class="addr">2qNDsuyTUWN2tjyjseHKdHg1njK6hBgkzUKQDqS7m3oi</div>
+</div>
+
+<script>
+
+let fundingMode = false;
+let feeMode = false;
+let helpOpen = false;
+let donateOpen = false;
+
+function num(v) {
+  return Number(String(v).replace(",", "."));
+}
+
+function toggleHelp() {
+  helpOpen = !helpOpen;
+  document.getElementById("helpBox").style.display =
+    helpOpen ? "block" : "none";
+}
+
+function toggleFunding() {
+  fundingMode = !fundingMode;
+  document.getElementById("fundingBlock")
+    .classList.toggle("hidden", !fundingMode);
+}
+
+function toggleFee() {
+  feeMode = !feeMode;
+  document.getElementById("feeBlock")
+    .classList.toggle("hidden", !feeMode);
+}
+
+function toggleDonate() {
+  donateOpen = !donateOpen;
+  document.getElementById("donateBox").style.display =
+    donateOpen ? "block" : "none";
+}
+
+function calc() {
+
+let short = num(document.getElementById("short").value);
+let long = num(document.getElementById("long").value);
+
+if (!short || !long) {
+  res.innerHTML = "Введите ТВХ";
+  return;
+}
+
+let feeShort = feeMode ? num(document.getElementById("feeShort").value) : 0.05;
+let feeLong  = feeMode ? num(document.getElementById("feeLong").value) : 0.05;
+
+let feeTotal = feeShort + feeLong;
+
+let baseSpread = ((short - long) / short) * 100;
+let initialSpread = baseSpread - feeTotal;
+
+let newShort = short;
+let newLong = long;
+
+if (fundingMode) {
+
+  let qty = num(document.getElementById("qty").value);
+  let fundShort = num(document.getElementById("fundShort").value);
+  let fundLong = num(document.getElementById("fundLong").value);
+
+  if (qty > 0) {
+    newShort = short + (fundShort / qty);
+    newLong  = long  - (fundLong / qty);
+  }
+}
+
+let finalBase = ((newShort - newLong) / newShort) * 100;
+let finalSpread = finalBase - feeTotal;
+
+res.innerHTML = `
+<div>Изначальный спред: ${initialSpread}</div>
+<hr>
+<div>ТВХ шорт: ${newShort}</div>
+<div>ТВХ лонг: ${newLong}</div>
+<hr>
+<div>Итог спред: ${finalSpread}</div>
+`;
+
+}
+
+</script>
+
+</body>
+</html>
