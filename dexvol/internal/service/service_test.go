@@ -242,3 +242,48 @@ func TestTokensChangedDoesNotBlock(t *testing.T) {
 		svc.TokensChanged()
 	}
 }
+
+func TestNewBaselineCrossingSendsInsideTheCooldown(t *testing.T) {
+	// End to end for the rule the owner asked for: a repeat of the same
+	// reading is silent, but a baseline crossing for the first time is a new
+	// fact and goes out without waiting for the cooldown.
+	svc, notifier, _ := newService(t)
+	b := base()
+
+	// Two hours of $100 minutes, so every window has a settled $100 median.
+	for i := 1; i <= 120; i++ {
+		advance(svc, b.Add(time.Duration(i)*time.Minute), 100)
+	}
+
+	// A step to $150 crosses all four baselines at once: one message.
+	advance(svc, b.Add(121*time.Minute), 150)
+	if notifier.count() != 1 {
+		t.Fatalf("got %d alerts on the step, want 1", notifier.count())
+	}
+
+	// Holding at $150 crosses nothing new, and the short medians have started
+	// absorbing the new level, so the next minutes stay silent.
+	for i := 122; i <= 124; i++ {
+		advance(svc, b.Add(time.Duration(i)*time.Minute), 150)
+	}
+	if notifier.count() != 1 {
+		t.Fatalf("holding the same level must stay silent, got %d alerts", notifier.count())
+	}
+}
+
+func TestRepeatedIdenticalMinuteStaysSilent(t *testing.T) {
+	// The owner's example, at service level: an alert on the daily median,
+	// then an identical minute, then nothing.
+	svc, notifier, _ := newService(t)
+	b := base()
+
+	for i := 1; i <= 120; i++ {
+		advance(svc, b.Add(time.Duration(i)*time.Minute), 100)
+	}
+	advance(svc, b.Add(121*time.Minute), 150)
+	advance(svc, b.Add(122*time.Minute), 150)
+
+	if notifier.count() != 1 {
+		t.Fatalf("got %d alerts, want 1", notifier.count())
+	}
+}

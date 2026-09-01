@@ -304,7 +304,7 @@ func (s *Service) judge(ctx context.Context, rt config.Runtime, tok domain.Token
 		return
 	}
 
-	msg := alert.Render(res)
+	msg := alert.Render(res, decision)
 	if err := s.notifier.Notify(ctx, msg); err != nil {
 		s.log.Error("could not deliver alert", "token", tok.Key(), "err", err)
 		return

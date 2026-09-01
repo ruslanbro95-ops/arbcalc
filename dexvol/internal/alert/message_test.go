@@ -34,7 +34,7 @@ func TestRenderMatchesSpecExample(t *testing.T) {
 		"Median: $100K",
 	}, "\n")
 
-	got := Render(res)
+	got := Render(res, Decision{})
 	if got.Text != want {
 		t.Fatalf("message mismatch:\n--- got ---\n%s\n--- want ---\n%s", got.Text, want)
 	}
@@ -54,7 +54,7 @@ func TestRenderOmitsUnusableWindows(t *testing.T) {
 		Primary:   detect.Change{Window: 10, Pct: 50, Median: 666},
 		Anomalous: true,
 	}
-	if strings.Contains(Render(res).Text, "24h") {
+	if strings.Contains(Render(res, Decision{}).Text, "24h") {
 		t.Fatal("a window without enough history must be omitted, not shown as 0%")
 	}
 }
@@ -66,8 +66,8 @@ func TestRenderFlagsDegradedData(t *testing.T) {
 		Primary:   detect.Change{Window: 10, Pct: 50, Median: 100},
 		Anomalous: true,
 	}
-	if !strings.Contains(Render(res).Text, "41/60m") {
-		t.Fatalf("degraded data must be visible in the alert:\n%s", Render(res).Text)
+	if !strings.Contains(Render(res, Decision{}).Text, "41/60m") {
+		t.Fatalf("degraded data must be visible in the alert:\n%s", Render(res, Decision{}).Text)
 	}
 }
 
@@ -76,7 +76,7 @@ func TestSanitizeSymbol(t *testing.T) {
 		Token:   domain.Token{Symbol: "EVIL #TOKEN", Chain: domain.ChainBase},
 		Primary: detect.Change{Median: 1},
 	}
-	line := strings.SplitN(Render(res).Text, "\n", 2)[0]
+	line := strings.SplitN(Render(res, Decision{}).Text, "\n", 2)[0]
 	if line != "#EVIL_TOKEN · base" {
 		t.Fatalf("got %q", line)
 	}
@@ -92,8 +92,8 @@ func TestRenderFlagsAMostlyHistoricalBaseline(t *testing.T) {
 		Primary:   detect.Change{Window: 10, Pct: 50, Median: 100, Samples: 10, Backfilled: 9},
 		Anomalous: true,
 	}
-	if !strings.Contains(Render(res).Text, "baseline mostly from history") {
-		t.Fatalf("expected the caveat:\n%s", Render(res).Text)
+	if !strings.Contains(Render(res, Decision{}).Text, "baseline mostly from history") {
+		t.Fatalf("expected the caveat:\n%s", Render(res, Decision{}).Text)
 	}
 }
 
@@ -104,7 +104,40 @@ func TestRenderStaysQuietWhenBaselineIsMostlyLive(t *testing.T) {
 		Primary:   detect.Change{Window: 10, Pct: 50, Median: 100, Samples: 10, Backfilled: 2},
 		Anomalous: true,
 	}
-	if strings.Contains(Render(res).Text, "from history") {
-		t.Fatalf("a mostly-live baseline needs no caveat:\n%s", Render(res).Text)
+	if strings.Contains(Render(res, Decision{}).Text, "from history") {
+		t.Fatalf("a mostly-live baseline needs no caveat:\n%s", Render(res, Decision{}).Text)
+	}
+}
+
+func TestRenderNamesTheNewlyCrossedBaselines(t *testing.T) {
+	// A message arriving inside an active cooldown has to justify itself, or
+	// it reads as the bot repeating.
+	res := detect.Result{
+		Token:  domain.Token{Symbol: "ABC", Chain: domain.ChainBase},
+		Volume: 150_000,
+		Changes: []detect.Change{
+			{Window: 10, Pct: 35, Median: 111_000, Usable: true, Exceeded: true},
+			{Window: 1440, Pct: 50, Median: 100_000, Usable: true, Exceeded: true},
+		},
+		Primary:   detect.Change{Window: 1440, Pct: 50, Median: 100_000},
+		Anomalous: true,
+	}
+	got := Render(res, Decision{Send: true, Reason: ReasonNewTrigger, NewWindows: []int{10}})
+
+	if !strings.Contains(got.Text, "\nnew: 10m") {
+		t.Fatalf("expected the new-trigger line:\n%s", got.Text)
+	}
+}
+
+func TestRenderOmitsTheNewLineForAFirstAlert(t *testing.T) {
+	// The opening message of an episode needs no explanation of why it came.
+	res := detect.Result{
+		Token:     domain.Token{Symbol: "ABC", Chain: domain.ChainBase},
+		Primary:   detect.Change{Window: 1440, Pct: 50, Median: 100},
+		Anomalous: true,
+	}
+	got := Render(res, Decision{Send: true, Reason: ReasonFirst, NewWindows: []int{1440}})
+	if strings.Contains(got.Text, "new:") {
+		t.Fatalf("a first alert needs no new-trigger line:\n%s", got.Text)
 	}
 }

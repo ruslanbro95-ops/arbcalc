@@ -30,7 +30,11 @@ type Message struct {
 //	60m +25%
 //	24h +15%
 //	Median: $100K
-func Render(res detect.Result) Message {
+//
+// A message that arrives inside an active cooldown carries a "new:" line
+// naming the baselines that crossed for the first time, so a repeat always
+// says what changed rather than looking like the bot spamming.
+func Render(res detect.Result, d Decision) Message {
 	var b strings.Builder
 
 	// The chain is part of the identity: the same symbol can be listed on
@@ -49,6 +53,14 @@ func Render(res detect.Result) Message {
 	}
 
 	fmt.Fprintf(&b, "Median: %s", FormatUSD(res.Primary.Median))
+
+	if d.Reason == ReasonNewTrigger && len(d.NewWindows) > 0 {
+		labels := make([]string, 0, len(d.NewWindows))
+		for _, w := range d.NewWindows {
+			labels = append(labels, FormatWindow(w))
+		}
+		fmt.Fprintf(&b, "\nnew: %s", strings.Join(labels, " "))
+	}
 
 	// Only mention data quality when it is imperfect — a clean feed should not
 	// spend a line saying so.
