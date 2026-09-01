@@ -37,10 +37,26 @@ type Options struct {
 	// MaxCatchUpChunks bounds how many chunks one poll may walk, so recovering
 	// from a long outage cannot monopolize the rate limit budget.
 	MaxCatchUpChunks int
+	// MaxAddressesPerCall caps how many pool addresses go into one
+	// eth_getLogs filter.
+	//
+	// Reading a whole chain in one request is the arithmetic this design
+	// rests on, and it still happens wherever the endpoint allows it. The
+	// public ones do not: publicnode answers `-32602 "Request blocked"` the
+	// moment the address array holds ten entries, on ethereum, bsc and base
+	// alike. The failure is total, not partial — no logs come back at all —
+	// so a token with ten pools would put its whole chain into an unbroken
+	// run of MISSING minutes. Nine is that endpoint's measured limit.
+	//
+	// The cost is one request per nine pools instead of one per chain. At
+	// 40 pools on four chains and four polls a minute that is 80 requests a
+	// minute rather than 16 — still far inside the budget in §5 of
+	// docs/RESEARCH.md. Raise it when RPC_* points at your own node.
+	MaxAddressesPerCall int
 }
 
 func DefaultOptions() Options {
-	return Options{Confirmations: 2, MaxBlockRange: 1000, MaxCatchUpChunks: 5}
+	return Options{Confirmations: 2, MaxBlockRange: 1000, MaxCatchUpChunks: 5, MaxAddressesPerCall: 9}
 }
 
 // poolMeta is the on-chain layout of a pool, resolved once and cached.
@@ -181,6 +197,28 @@ func (s *Source) poolAddresses() []string {
 	return out
 }
 
+// getLogs reads one block range across every watched pool, splitting the
+// address filter into as many requests as the endpoint will accept.
+//
+// Chunks cover disjoint pools, so concatenating their results loses nothing;
+// the engine buckets by block timestamp and dedup keys on tx hash plus log
+// index, neither of which depends on the order logs arrive in.
+func (s *Source) getLogs(ctx context.Context, from, to uint64, addresses, topics []string) ([]Log, error) {
+	size := s.opts.MaxAddressesPerCall
+	if size <= 0 || size > len(addresses) {
+		size = len(addresses)
+	}
+	var out []Log
+	for start := 0; start < len(addresses); start += size {
+		logs, err := s.rpc.GetLogs(ctx, from, to, addresses[start:min(start+size, len(addresses))], topics)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, logs...)
+	}
+	return out, nil
+}
+
 // Poll fetches everything new since the last successful call.
 func (s *Source) Poll(ctx context.Context, out chan<- domain.Trade) error {
 	addresses := s.poolAddresses()
@@ -230,7 +268,7 @@ func (s *Source) Poll(ctx context.Context, out chan<- domain.Trade) error {
 	for chunk := 0; chunk < s.opts.MaxCatchUpChunks && from <= safeHead; chunk++ {
 		to := min(from+s.opts.MaxBlockRange-1, safeHead)
 
-		logs, err := s.rpc.GetLogs(ctx, from, to, addresses, evm.SwapTopics())
+		logs, err := s.getLogs(ctx, from, to, addresses, evm.SwapTopics())
 		if err != nil {
 			s.setHealthy(false)
 			return fmt.Errorf("getLogs %d-%d: %w", from, to, err)

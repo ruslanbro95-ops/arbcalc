@@ -59,6 +59,8 @@ func run() error {
 			"check the chain registry's GeckoTerminal ids against the live network list and exit")
 		listNetworks = flag.String("list-networks", "",
 			"print every GeckoTerminal network whose id or name contains this text, then exit; pass \"all\" for the whole list")
+		maxAddresses = flag.Int("max-addresses", 9,
+			"how many pool addresses one eth_getLogs filter may hold; public endpoints reject ten or more outright")
 		verbose = flag.Bool("v", false, "debug logging")
 	)
 	flag.Parse()
@@ -108,7 +110,7 @@ func run() error {
 	}
 
 	engine := volume.NewEngine()
-	srcs := buildSources(res, tokens, prices, log)
+	srcs := buildSources(res, tokens, prices, *maxAddresses, log)
 	if len(srcs) == 0 {
 		return fmt.Errorf("no chain in the token list has an ingestion adapter")
 	}
@@ -230,7 +232,7 @@ func parseTokens(s string) ([]domain.Token, error) {
 	return out, nil
 }
 
-func buildSources(res service.DiscoveryResult, tokens []domain.Token, prices *service.PriceCache, log *slog.Logger) map[domain.Chain]service.TradeSource {
+func buildSources(res service.DiscoveryResult, tokens []domain.Token, prices *service.PriceCache, maxAddresses int, log *slog.Logger) map[domain.Chain]service.TradeSource {
 	endpoints := map[domain.Chain]string{}
 	for _, info := range domain.Chains() {
 		endpoints[info.Chain] = env(info.RPCEnv, info.DefaultRPC)
@@ -251,7 +253,9 @@ func buildSources(res service.DiscoveryResult, tokens []domain.Token, prices *se
 		if chain == domain.ChainSolana {
 			src = solanarpc.NewSource(solanarpc.NewRPC(url, 240), prices, solanarpc.DefaultOptions(), log)
 		} else if chain.IsEVM() {
-			src = evmrpc.NewSource(chain, evmrpc.NewRPC(string(chain), url, 120), prices, evmrpc.DefaultOptions(), log)
+			opts := evmrpc.DefaultOptions()
+			opts.MaxAddressesPerCall = maxAddresses
+			src = evmrpc.NewSource(chain, evmrpc.NewRPC(string(chain), url, 120), prices, opts, log)
 		} else {
 			continue
 		}

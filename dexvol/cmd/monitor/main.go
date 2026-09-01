@@ -125,9 +125,11 @@ func buildSources(static config.Static, prices *service.PriceCache, log *slog.Lo
 			log.Warn("no ingestion adapter for chain", "chain", chain)
 			continue
 		}
+		opts := evmrpc.DefaultOptions()
+		opts.MaxAddressesPerCall = static.EVMMaxAddressesPerCall
 		out[chain] = evmrpc.NewSource(chain,
 			evmrpc.NewRPC(string(chain), url, rpcBudget(chain)),
-			prices, evmrpc.DefaultOptions(), log)
+			prices, opts, log)
 	}
 
 	if len(out) == 0 {

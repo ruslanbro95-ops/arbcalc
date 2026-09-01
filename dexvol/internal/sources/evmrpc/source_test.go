@@ -3,6 +3,7 @@ package evmrpc
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -472,5 +473,31 @@ func TestPollableAddress(t *testing.T) {
 		if got := PollableAddress(tc.id); got != tc.want {
 			t.Errorf("PollableAddress(%q) = %v, want %v", tc.id, got, tc.want)
 		}
+	}
+}
+
+func TestAddressFilterIsSplitToWhatTheEndpointAccepts(t *testing.T) {
+	// publicnode answers `-32602 "Request blocked"` to an eth_getLogs filter
+	// holding ten or more addresses, on ethereum, bsc and base alike, and it
+	// rejects the whole request rather than trimming it. Unsplit, a token with
+	// ten pools would leave its entire chain without a single log.
+	n := &node{head: 1000, blockTime: time.Date(2026, 9, 1, 12, 30, 0, 0, time.UTC).Unix()}
+	s := newSource(t, n, fixedPrices{tokenAddr: 2})
+
+	pools := make([]domain.Pool, 20)
+	for i := range pools {
+		pools[i] = domain.Pool{Chain: domain.ChainBase, Address: fmt.Sprintf("0x%040x", i+1), DEX: "uniswap"}
+	}
+	s.SetPools(pools)
+
+	drain(t, s) // seed
+	n.head = 1001
+	drain(t, s)
+
+	if n.getLogsN != 3 { // 20 addresses, 9 per call
+		t.Fatalf("getLogs called %d times for 20 pools, want 3 calls of at most 9 addresses", n.getLogsN)
+	}
+	if len(n.lastAddrs) > 9 {
+		t.Fatalf("a filter carried %d addresses, want at most 9", len(n.lastAddrs))
 	}
 }

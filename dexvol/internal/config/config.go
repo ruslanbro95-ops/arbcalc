@@ -39,6 +39,11 @@ type Static struct {
 	RawTradeRetention time.Duration
 	// RPCEndpoints maps a chain to its JSON-RPC URL.
 	RPCEndpoints map[domain.Chain]string
+	// EVMMaxAddressesPerCall caps how many pool addresses go into one
+	// eth_getLogs filter. The public defaults reject ten or more outright, so
+	// this is not a tuning knob but the difference between a chain having data
+	// and having none. Raise it when RPC_* points at your own node.
+	EVMMaxAddressesPerCall int
 	// LogLevel is "debug", "info", "warn" or "error".
 	LogLevel string
 }
@@ -91,15 +96,16 @@ func LoadStatic() (Static, error) {
 	}
 
 	s := Static{
-		TelegramToken:     os.Getenv("TELEGRAM_BOT_TOKEN"),
-		StatePath:         envStr("STATE_PATH", "state.json"),
-		DBPath:            envStr("DB_PATH", "dexvol.db"),
-		PollInterval:      envDur("POLL_INTERVAL", 12*time.Second),
-		SealDelay:         envDur("SEAL_DELAY", 20*time.Second),
-		PoolRefresh:       envDur("POOL_REFRESH", 5*time.Minute),
-		RawTradeRetention: envDur("RAW_TRADE_RETENTION", 48*time.Hour),
-		LogLevel:          envStr("LOG_LEVEL", "info"),
-		RPCEndpoints:      map[domain.Chain]string{},
+		TelegramToken:          os.Getenv("TELEGRAM_BOT_TOKEN"),
+		StatePath:              envStr("STATE_PATH", "state.json"),
+		DBPath:                 envStr("DB_PATH", "dexvol.db"),
+		PollInterval:           envDur("POLL_INTERVAL", 12*time.Second),
+		SealDelay:              envDur("SEAL_DELAY", 20*time.Second),
+		PoolRefresh:            envDur("POOL_REFRESH", 5*time.Minute),
+		RawTradeRetention:      envDur("RAW_TRADE_RETENTION", 48*time.Hour),
+		EVMMaxAddressesPerCall: envInt("EVM_MAX_ADDRESSES_PER_CALL", 9),
+		LogLevel:               envStr("LOG_LEVEL", "info"),
+		RPCEndpoints:           map[domain.Chain]string{},
 	}
 
 	if s.TelegramToken == "" {
@@ -243,4 +249,13 @@ func envDur(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
 }
