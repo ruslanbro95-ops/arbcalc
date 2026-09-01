@@ -581,25 +581,34 @@ func (s *Source) decode(l Log, times map[uint64]time.Time) (domain.Trade, bool) 
 	}, true
 }
 
-// valueUSD prices a swap, preferring the tracked token's own price and falling
-// back to the other side of the pool.
+// valueUSD prices one swap, reading the counterparty leg first.
 //
-// The fallback matters for a freshly listed token that no aggregator prices
-// yet: its WETH or USDC counterpart is always priced, and the swap's dollar
-// value is the same measured from either side.
+// A swap is an exchange, so it can be valued from either side, and the sides
+// are not equally trustworthy. The counterparty is USDT, USDC, WETH, WBNB or
+// SOL — a handful of assets per chain, always deeply liquid, always priced by
+// every source, and for a stablecoin the swap's own amount is the dollar
+// figure with no quote needed at all. The tracked token is the opposite: it is
+// often new, thin, or listed minutes ago, which is exactly when an aggregator
+// has no price for it — and exactly when a volume spike matters most.
+//
+// Taking the token's own price first also made the whole watch list depend on
+// per-token price lookups, which is what the provider's batch endpoint was
+// quietly failing to deliver. Reading the counterparty needs about five prices
+// per chain instead of one per token.
 func (s *Source) valueUSD(tok domain.Token, tokenAmount float64, otherAddr string, otherAmt *big.Int, otherDec int) (usd, price float64) {
-	if p, ok := s.prices.PriceUSD(s.chain, tok.Address); ok && p > 0 {
-		return tokenAmount * p, p
-	}
-	if otherAmt != nil {
+	if otherAmt != nil && otherAmt.Sign() != 0 {
 		if p, ok := s.prices.PriceUSD(s.chain, otherAddr); ok && p > 0 {
-			otherAmount := evm.ToFloat(evm.Abs(otherAmt), otherDec)
-			usd = otherAmount * p
+			usd = evm.ToFloat(evm.Abs(otherAmt), otherDec) * p
 			if tokenAmount > 0 {
 				price = usd / tokenAmount
 			}
 			return usd, price
 		}
+	}
+	// No price for the counterparty either — an exotic pair, or a pool whose
+	// both sides are unlisted. The token's own quote is the last resort.
+	if p, ok := s.prices.PriceUSD(s.chain, tok.Address); ok && p > 0 {
+		return tokenAmount * p, p
 	}
 	return 0, 0
 }

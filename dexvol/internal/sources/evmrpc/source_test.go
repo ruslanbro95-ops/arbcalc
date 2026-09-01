@@ -517,3 +517,31 @@ func TestAddressCapPrefersTheOverrideThenTheEndpointsKnownLimit(t *testing.T) {
 		t.Errorf("unknown chain cap = %d, want 0", got)
 	}
 }
+
+func TestCounterpartySideWinsEvenWhenTheTokenHasItsOwnPrice(t *testing.T) {
+	// Both sides are priced here and they disagree: the WETH leg says $4000,
+	// the token's own quote says 500 x $9 = $4500. The counterparty must win.
+	// It is the deeply liquid side, and the tracked token's quote is the one
+	// that goes stale, arrives late, or never exists at all for a listing that
+	// is minutes old — which is precisely when its volume spikes.
+	n := &node{head: 1000, blockTime: time.Now().Unix()}
+	s := newSource(t, n, fixedPrices{wethAddr: 4000, tokenAddr: 9})
+	drain(t, s)
+
+	e18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	n.mu.Lock()
+	n.head = 1010
+	n.logs = []Log{v2SwapLog(1000, 0, "0xEEE",
+		e18,
+		new(big.Int).Mul(big.NewInt(500), e18))}
+	n.mu.Unlock()
+
+	got := drain(t, s)
+	if len(got) != 1 {
+		t.Fatalf("got %d trades", len(got))
+	}
+	if got[0].USDVolume != 4000 {
+		t.Fatalf("usd = %v, want 4000 from the WETH leg, not 4500 from the token's own price",
+			got[0].USDVolume)
+	}
+}
