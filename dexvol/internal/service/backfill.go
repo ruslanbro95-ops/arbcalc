@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -40,7 +41,21 @@ type BackfillOptions struct {
 	// it arrive too late to count, and pre-empt its MISSING verdict. Losing
 	// five minutes from the far end of a 24h window costs nothing.
 	LiveGuard time.Duration
+	// ThrottleBackoff is how long to wait before retrying a pool the provider
+	// refused with 429.
+	//
+	// It exists because the free tier sends no Retry-After, so there is
+	// nothing to pace by except its published per-minute budget. Zero uses
+	// the default; the tests set it small so the suite does not sleep.
+	ThrottleBackoff time.Duration
 }
+
+// backfillRetries and backfillMinBackoff pace a bulk history read against a
+// free tier that answers 429 without a Retry-After header.
+const (
+	backfillRetries    = 6
+	backfillMinBackoff = 8 * time.Second
+)
 
 func DefaultBackfillOptions() BackfillOptions {
 	return BackfillOptions{
@@ -49,6 +64,7 @@ func DefaultBackfillOptions() BackfillOptions {
 		MinVolumeShare:  0.95,
 		MaxPagesPerPool: 3,
 		LiveGuard:       5 * time.Minute,
+		ThrottleBackoff: 8 * time.Second,
 	}
 }
 
@@ -144,7 +160,7 @@ func (b *Backfiller) Run(ctx context.Context, tok domain.Token, pools []domain.P
 	// trading — it is absence of data.
 	var reach []poolReach
 	for _, pool := range selected {
-		candles, err := b.fetchPool(ctx, pool, start, end)
+		candles, err := b.fetchPoolPatiently(ctx, pool, start, end)
 		if err != nil {
 			// A failed pool means its volume is missing from every minute.
 			// Continue only if the rest still clears the bar.
@@ -352,4 +368,49 @@ func shareOf(fetched float64, pools []domain.Pool) float64 {
 		return 0
 	}
 	return fetched / total
+}
+
+// fetchPoolPatiently waits out a provider throttle instead of writing the pool
+// off as missing volume.
+//
+// A poll must never wait — a minute that arrives late is worse than one marked
+// MISSING — but a backfill is the opposite case: a one-off bulk read at
+// startup where the only thing waiting costs is time. Treating "wait your
+// turn" as a failed pool is what made ten tokens report between 0% and 23% of
+// their volume fetched and cancel their history outright, leaving every median
+// to warm up from scratch.
+//
+// The provider sends 429 with no Retry-After, so the header cannot be trusted
+// to pace this; the backoff below is what the free tier's per-minute budget
+// implies. Attempts are bounded so a provider that is down cannot hold startup
+// open forever.
+func (b *Backfiller) fetchPoolPatiently(ctx context.Context, pool domain.Pool, start, end time.Time) ([]sources.Candle, error) {
+	var lastErr error
+	for attempt := 0; attempt < backfillRetries; attempt++ {
+		candles, err := b.fetchPool(ctx, pool, start, end)
+		if err == nil {
+			return candles, nil
+		}
+		lastErr = err
+
+		var throttled *sources.RateLimitError
+		if !errors.As(err, &throttled) {
+			return nil, err
+		}
+		wait := throttled.RetryAfter
+		if floor := b.opts.ThrottleBackoff; wait < floor {
+			wait = floor
+		}
+		if wait <= 0 {
+			wait = backfillMinBackoff
+		}
+		b.log.Debug("history throttled, waiting",
+			"pool", pool.Address, "attempt", attempt+1, "wait", wait)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, lastErr
 }

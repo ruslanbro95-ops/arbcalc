@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,7 +73,10 @@ func newBackfiller(t *testing.T, h sources.HistorySource) (*Backfiller, *volume.
 	_ = filepath.Join
 
 	eng := volume.NewEngine()
-	return NewBackfiller(h, eng, db, DefaultBackfillOptions(), discardLog()), eng, db
+	opts := DefaultBackfillOptions()
+	// The suite must not sleep out a real provider backoff.
+	opts.ThrottleBackoff = time.Millisecond
+	return NewBackfiller(h, eng, db, opts, discardLog()), eng, db
 }
 
 var bfToken = domain.Token{Symbol: "ABC", Chain: domain.ChainBase, Address: "0xAA", Enabled: true}
@@ -366,5 +370,51 @@ func TestBackfillReportsWhenHistoryMissesTheWindowEntirely(t *testing.T) {
 	}
 	if eng.SealedCount(bfToken.Key(), now, volume.Window24h) > 1 {
 		t.Fatal("almost nothing should have been written")
+	}
+}
+
+// throttlingHistory refuses the first n calls per pool the way a free tier
+// does: 429 with no Retry-After, so the error carries a zero wait.
+type throttlingHistory struct {
+	stubHistory
+	mu      sync.Mutex
+	refused map[string]int
+	limit   int
+}
+
+func (t *throttlingHistory) OHLCVMinute(ctx context.Context, pool domain.Pool, from int, before time.Time) ([]sources.Candle, error) {
+	t.mu.Lock()
+	if t.refused == nil {
+		t.refused = map[string]int{}
+	}
+	n := t.refused[pool.Address]
+	if n < t.limit {
+		t.refused[pool.Address] = n + 1
+		t.mu.Unlock()
+		return nil, &sources.RateLimitError{Source: "geckoterminal"}
+	}
+	t.mu.Unlock()
+	return t.stubHistory.OHLCVMinute(ctx, pool, from, before)
+}
+
+func TestBackfillWaitsOutAThrottleInsteadOfLosingThePool(t *testing.T) {
+	// The provider answers 429 with no Retry-After, so the error carries a
+	// zero wait and the old code wrote the pool off immediately. Ten tokens
+	// then reported 0%–23% of their volume fetched and cancelled their
+	// history, which is how every median ended up warming from scratch while
+	// the data sat one retry away.
+	h := &throttlingHistory{
+		stubHistory: stubHistory{perPool: map[string]float64{"A": 100}},
+		limit:       1,
+	}
+	bf, _, _ := newBackfiller(t, h)
+
+	rep := bf.Run(context.Background(), bfToken, poolsFor(1000), time.Now().UTC())
+
+	if !rep.Filled {
+		t.Fatalf("backfill gave up on a throttle: %s", rep.Reason)
+	}
+	if rep.PoolsUsed == 0 {
+		t.Fatal("no pool survived the retry")
 	}
 }
