@@ -54,12 +54,14 @@ func Render(res detect.Result, d Decision) Message {
 
 	fmt.Fprintf(&b, "Median: %s", FormatUSD(res.Primary.Median))
 
-	if d.Reason == ReasonNewTrigger && len(d.NewWindows) > 0 {
-		labels := make([]string, 0, len(d.NewWindows))
-		for _, w := range d.NewWindows {
-			labels = append(labels, FormatWindow(w))
-		}
-		fmt.Fprintf(&b, "\nnew: %s", strings.Join(labels, " "))
+	// A repeat inside an active cooldown has to justify itself, or it reads as
+	// the bot spamming. Each of the two ways through the cooldown names what
+	// let it through.
+	switch {
+	case d.Reason == ReasonNewTrigger && len(d.NewWindows) > 0:
+		fmt.Fprintf(&b, "\nnew: %s", windowLabels(d.NewWindows))
+	case d.Reason == ReasonEscalation && len(d.EscalatedWindows) > 0:
+		fmt.Fprintf(&b, "\nescalated: %s", windowLabels(d.EscalatedWindows))
 	}
 
 	// Only mention data quality when it is imperfect — a clean feed should not
@@ -77,6 +79,14 @@ func Render(res detect.Result, d Decision) Message {
 	}
 
 	return Message{Text: b.String(), Links: Links(res.Token)}
+}
+
+func windowLabels(windows []int) string {
+	labels := make([]string, 0, len(windows))
+	for _, w := range windows {
+		labels = append(labels, FormatWindow(w))
+	}
+	return strings.Join(labels, " ")
 }
 
 // sanitizeSymbol keeps a hashtag from being broken by whitespace or a '#' in a

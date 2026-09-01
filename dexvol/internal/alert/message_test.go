@@ -141,3 +141,16 @@ func TestRenderOmitsTheNewLineForAFirstAlert(t *testing.T) {
 		t.Fatalf("a first alert needs no new-trigger line:\n%s", got.Text)
 	}
 }
+
+func TestRenderNamesTheEscalatedBaseline(t *testing.T) {
+	res := detect.Result{
+		Token:     domain.Token{Symbol: "ABC", Chain: domain.ChainBase},
+		Volume:    500_000,
+		Primary:   detect.Change{Window: 1440, Pct: 250, Median: 142_000},
+		Anomalous: true,
+	}
+	got := Render(res, Decision{Send: true, Reason: ReasonEscalation, EscalatedWindows: []int{1440}})
+	if !strings.Contains(got.Text, "\nescalated: 24h") {
+		t.Fatalf("expected the escalation line:\n%s", got.Text)
+	}
+}

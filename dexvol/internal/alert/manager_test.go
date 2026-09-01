@@ -214,3 +214,81 @@ func TestTokensAreIndependent(t *testing.T) {
 		t.Fatal("one token's cooldown must not silence another")
 	}
 }
+
+// pump is the usual shape of a sustained rally: the short medians absorb the
+// new level within minutes so their percentages fade, while the 24h median —
+// 1,440 samples deep — barely moves, so its percentage keeps climbing.
+func pump(short, daily float64) detect.Result {
+	return result(20, map[int]float64{volume.Window10m: short, volume.Window24h: daily})
+}
+
+func TestEscalationIsMeasuredPerWindow(t *testing.T) {
+	// Minute 1: 10m +200%, 24h +50%. Minute 5: 10m has faded to +80% while
+	// 24h has grown fivefold to +250%.
+	//
+	// Comparing "the largest window now" against "the largest window then"
+	// pits 24h's 250 against 10m's 200 and calls it no escalation — silencing
+	// a baseline that quintupled. Each window must be judged against its own
+	// last reported value.
+	m := NewManager()
+	p := policy()
+
+	if d := m.Decide("k", pump(200, 50), base(), p); !d.Send {
+		t.Fatal("the opening alert should send")
+	}
+	d := m.Decide("k", pump(80, 250), base().Add(4*time.Minute), p)
+
+	if !d.Send || d.Reason != ReasonEscalation {
+		t.Fatalf("a 24h baseline growing 50%% -> 250%% must escalate, got %+v", d)
+	}
+	if len(d.EscalatedWindows) != 1 || d.EscalatedWindows[0] != volume.Window24h {
+		t.Fatalf("escalated windows = %v, want [1440]", d.EscalatedWindows)
+	}
+}
+
+func TestAFadingWindowDoesNotEscalate(t *testing.T) {
+	// The mirror case: 10m shrank, so nothing about it is new. Without a
+	// per-window bar, 10m's fall could be masked by 24h's rise or vice versa.
+	m := NewManager()
+	p := policy()
+
+	m.Decide("k", pump(200, 50), base(), p)
+	d := m.Decide("k", pump(90, 60), base().Add(time.Minute), p)
+	if d.Send {
+		t.Fatalf("neither window doubled its own reading, got %s", d.Reason)
+	}
+}
+
+func TestEscalationBarRearmsPerWindow(t *testing.T) {
+	m := NewManager()
+	p := policy()
+
+	m.Decide("k", pump(200, 50), base(), p)
+	// 24h escalates to 250 and the message reports both windows.
+	m.Decide("k", pump(80, 250), base().Add(time.Minute), p)
+	// 24h must now clear 500, not 100, to escalate again.
+	if d := m.Decide("k", pump(80, 400), base().Add(2*time.Minute), p); d.Send {
+		t.Fatalf("24h's bar should have moved to its reported 250, got %s", d.Reason)
+	}
+	if d := m.Decide("k", pump(80, 520), base().Add(3*time.Minute), p); !d.Send {
+		t.Fatal("clearing the new bar must send")
+	}
+}
+
+func TestReportedValuesRefreshForEveryShownWindow(t *testing.T) {
+	// The message lists every crossing baseline, so after a send the owner has
+	// seen all of those numbers and each bar belongs at what was shown — not
+	// only the window that triggered the send.
+	m := NewManager()
+	p := policy()
+
+	m.Decide("k", pump(30, 30), base(), p)
+	// 10m triples: escalation. The message also shows 24h at 100.
+	if d := m.Decide("k", pump(90, 100), base().Add(time.Minute), p); !d.Send {
+		t.Fatal("10m tripling must escalate")
+	}
+	// 24h at 150 is only 1.5x its shown 100, so it must not send.
+	if d := m.Decide("k", pump(90, 150), base().Add(2*time.Minute), p); d.Send {
+		t.Fatalf("24h's bar should sit at the reported 100, got %s", d.Reason)
+	}
+}

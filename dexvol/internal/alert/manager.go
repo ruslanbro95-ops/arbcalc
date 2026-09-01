@@ -29,14 +29,17 @@ type Decision struct {
 	// time in this episode. The message quotes them, so a repeat inside the
 	// cooldown always answers "why am I seeing this again".
 	NewWindows []int
+	// EscalatedWindows names the baselines whose own reading grew past the
+	// escalation factor since they were last reported.
+	EscalatedWindows []int
 }
 
 // Policy is the owner-configurable part of the decision.
 type Policy struct {
 	Cooldown time.Duration
 	// EscalationFactor lets a much stronger reading interrupt an active
-	// cooldown even when no new baseline crossed: the change must be at least
-	// this many times the one already reported.
+	// cooldown even when no new baseline crossed: some baseline's change must
+	// be at least this many times what that same baseline last reported.
 	//
 	// The default is 2.0, not 1.5, and the spec is what fixes it. Its worked
 	// example runs +50/+70/+80/+60% over four consecutive minutes and calls
@@ -50,15 +53,24 @@ type Policy struct {
 // state is one token's live alert episode.
 type state struct {
 	lastAlert time.Time
-	lastPct   float64
-	// fired is the set of baseline windows already reported in this episode.
+	// reported holds, per baseline window, the percentage last announced for
+	// it. A window present here has already fired in this episode.
 	//
-	// This is what separates "the same anomaly, still running" from "something
-	// new happened". A minute repeating the previous reading crosses no window
-	// it has not already crossed, so it stays silent; a minute where another
-	// baseline crosses for the first time is a different fact about the market
-	// and goes out immediately, without waiting for the cooldown.
-	fired map[int]bool
+	// Keeping it per window does two jobs. It separates "the same anomaly,
+	// still running" from "something new happened": a minute repeating the
+	// previous reading crosses no window it has not already crossed, so it
+	// stays silent, while a baseline crossing for the first time goes out at
+	// once.
+	//
+	// And it keeps escalation honest. Measuring growth against whichever
+	// window happened to be largest last time compares different baselines to
+	// each other, which silences the most common shape of a sustained pump:
+	// the short medians absorb the new level within minutes so their
+	// percentages fade, while the 24h median — 1,440 samples deep — barely
+	// moves, so its percentage keeps climbing. Compared against the earlier
+	// 10m reading, a 24h anomaly growing fivefold looks like a decline and is
+	// suppressed. Compared against its own last value, it is what it is.
+	reported map[int]float64
 }
 
 // Manager enforces cooldown and deduplication across alerts.
@@ -81,52 +93,70 @@ func (m *Manager) Decide(key string, res detect.Result, now time.Time, p Policy)
 	if !res.Anomalous {
 		return Decision{Reason: ReasonNoAnomaly}
 	}
-	exceeded := exceededWindows(res)
+	exceeded := exceededChanges(res)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	st := m.states[key]
 	if st == nil {
-		m.states[key] = &state{lastAlert: now, lastPct: res.Primary.Pct, fired: setOf(exceeded)}
-		return Decision{Send: true, Reason: ReasonFirst, NewWindows: exceeded}
+		m.states[key] = &state{lastAlert: now, reported: pctByWindow(exceeded)}
+		return Decision{Send: true, Reason: ReasonFirst, NewWindows: windowsOf(exceeded)}
 	}
 
-	// The cooldown has run out: the episode restarts, and the window set with
-	// it, so a baseline that crosses again later counts as new again.
+	// The cooldown has run out: the episode restarts, and the reported set
+	// with it, so a baseline that crosses again later counts as new again.
 	if now.Sub(st.lastAlert) >= p.Cooldown {
 		st.lastAlert = now
-		st.lastPct = res.Primary.Pct
-		st.fired = setOf(exceeded)
-		return Decision{Send: true, Reason: ReasonCooldown, NewWindows: exceeded}
+		st.reported = pctByWindow(exceeded)
+		return Decision{Send: true, Reason: ReasonCooldown, NewWindows: windowsOf(exceeded)}
 	}
 
 	// A baseline crossing for the first time in this episode is a new fact,
 	// not a repeat, and goes out regardless of the cooldown.
 	var fresh []int
-	for _, w := range exceeded {
-		if !st.fired[w] {
-			fresh = append(fresh, w)
+	for _, ch := range exceeded {
+		if _, seen := st.reported[ch.Window]; !seen {
+			fresh = append(fresh, ch.Window)
 		}
 	}
 	if len(fresh) > 0 {
-		for _, w := range fresh {
-			st.fired[w] = true
-		}
 		st.lastAlert = now
-		st.lastPct = res.Primary.Pct
+		st.record(exceeded)
 		return Decision{Send: true, Reason: ReasonNewTrigger, NewWindows: fresh}
 	}
 
-	// No new baseline, but the move itself grew enough that staying silent
-	// would hide a materially different event behind the earlier, smaller one.
-	if p.EscalationFactor > 1 && st.lastPct > 0 && res.Primary.Pct >= st.lastPct*p.EscalationFactor {
+	// No new baseline, but some baseline's own reading grew enough that
+	// staying silent would hide a materially different event behind the
+	// earlier, smaller one. Each window is judged against what it itself last
+	// reported, never against another window's number.
+	var escalated []int
+	if p.EscalationFactor > 1 {
+		for _, ch := range exceeded {
+			prev := st.reported[ch.Window]
+			if prev > 0 && ch.Pct >= prev*p.EscalationFactor {
+				escalated = append(escalated, ch.Window)
+			}
+		}
+	}
+	if len(escalated) > 0 {
 		st.lastAlert = now
-		st.lastPct = res.Primary.Pct
-		return Decision{Send: true, Reason: ReasonEscalation}
+		st.record(exceeded)
+		return Decision{Send: true, Reason: ReasonEscalation, EscalatedWindows: escalated}
 	}
 
 	return Decision{Reason: ReasonSuppressed}
+}
+
+// record refreshes the reported percentage of every exceeded window.
+//
+// All of them, not only the ones that triggered the send: the message lists
+// every crossing baseline, so the owner has now seen each of those numbers and
+// the bar for "grew again" belongs at what was shown.
+func (s *state) record(exceeded []detect.Change) {
+	for _, ch := range exceeded {
+		s.reported[ch.Window] = ch.Pct
+	}
 }
 
 // Reset forgets a token's alert history, used when it is removed from the
@@ -137,23 +167,31 @@ func (m *Manager) Reset(key string) {
 	m.mu.Unlock()
 }
 
-// exceededWindows lists the baselines that crossed the threshold, smallest
+// exceededChanges lists the baselines that crossed the threshold, smallest
 // window first so messages read consistently.
-func exceededWindows(res detect.Result) []int {
-	var out []int
+func exceededChanges(res detect.Result) []detect.Change {
+	var out []detect.Change
 	for _, ch := range res.Changes {
 		if ch.Exceeded {
-			out = append(out, ch.Window)
+			out = append(out, ch)
 		}
 	}
-	sort.Ints(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Window < out[j].Window })
 	return out
 }
 
-func setOf(windows []int) map[int]bool {
-	m := make(map[int]bool, len(windows))
-	for _, w := range windows {
-		m[w] = true
+func windowsOf(changes []detect.Change) []int {
+	out := make([]int, 0, len(changes))
+	for _, ch := range changes {
+		out = append(out, ch.Window)
+	}
+	return out
+}
+
+func pctByWindow(changes []detect.Change) map[int]float64 {
+	m := make(map[int]float64, len(changes))
+	for _, ch := range changes {
+		m[ch.Window] = ch.Pct
 	}
 	return m
 }
