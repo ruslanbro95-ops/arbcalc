@@ -80,10 +80,10 @@ func feed(svc *Service, minute time.Time, usd float64) {
 
 func base() time.Time { return time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC) }
 
-// seal closes exactly the given minute: the seal deadline for minute m falls
-// at m + SealDelay, so any instant just past that lands on m.
+// seal closes exactly the given minute. Minute m ends at m+1min and the grace
+// period runs from there, so any instant just past m+1min+SealDelay lands on m.
 func seal(svc *Service, minute time.Time) {
-	svc.sealDue(context.Background(), minute.Add(svc.static.SealDelay).Add(time.Second))
+	svc.sealDue(context.Background(), minute.Add(time.Minute).Add(svc.static.SealDelay).Add(time.Second))
 }
 
 // advance records one minute of volume and then closes it, the way the running
@@ -327,5 +327,96 @@ func TestRepeatedIdenticalMinuteStaysSilent(t *testing.T) {
 
 	if notifier.count() != 1 {
 		t.Fatalf("got %d alerts, want 1", notifier.count())
+	}
+}
+
+func TestMinuteIsNotSealedBeforeItEnds(t *testing.T) {
+	// Minute m spans [m, m+1min). Sealing it any earlier both loses the trades
+	// still to come and — worse — seals it QualityOK at whatever partial total
+	// it holds, because the poll behind it succeeded. Those fake numbers then
+	// enter every median.
+	//
+	// This drives the real seal loop: a one-second tick calling sealDue, with a
+	// trade arriving late in the minute exactly as consumeTrades would deliver
+	// it.
+	svc, _, _ := newService(t)
+	m := base().Add(10 * time.Minute)
+
+	var sealedAt time.Time
+	for sec := -5; sec <= 120; sec++ {
+		now := m.Add(time.Duration(sec) * time.Second)
+		if sec >= 0 && sec%12 == 0 {
+			svc.health.record(testToken.Chain, now, true)
+		}
+		if sec == 46 {
+			ok := svc.engine.Ingest(domain.Trade{
+				Timestamp: m.Add(45 * time.Second), Chain: testToken.Chain,
+				TokenAddress: testToken.Address, TxHash: "late", LogIndex: 0,
+				Side: domain.SideBuy, USDVolume: 999,
+			})
+			if !ok {
+				t.Fatal("a trade 45s into the minute must still be accepted")
+			}
+		}
+		before := svc.lastSealed
+		svc.sealDue(context.Background(), now)
+		if !svc.lastSealed.Equal(before) && svc.lastSealed.Equal(m) {
+			sealedAt = now
+		}
+	}
+
+	if sealedAt.IsZero() {
+		t.Fatal("the minute was never sealed")
+	}
+	if sealedAt.Before(m.Add(time.Minute)) {
+		t.Fatalf("minute sealed at %s, %v before it ended",
+			sealedAt.Format("15:04:05"), m.Add(time.Minute).Sub(sealedAt))
+	}
+	if got := sealedAt.Sub(m.Add(time.Minute)); got > svc.static.SealDelay+2*time.Second {
+		t.Fatalf("minute sealed %v after it ended, later than the %v grace period",
+			got, svc.static.SealDelay)
+	}
+
+	snap := svc.engine.Snapshot(testToken, m)
+	if snap.Current.Total != 999 || snap.Current.Trades != 1 {
+		t.Fatalf("bucket = %v over %d trades, want the late trade counted",
+			snap.Current.Total, snap.Current.Trades)
+	}
+	if svc.engine.Stats().TooLate != 0 {
+		t.Fatalf("no trade should have missed the deadline, got %d", svc.engine.Stats().TooLate)
+	}
+}
+
+func TestLateTradesDoNotCreateFakeZeroMinutes(t *testing.T) {
+	// The downstream harm of sealing early: minutes whose trades all missed the
+	// deadline sealed healthy at $0, dragged every median down, and made the
+	// next ordinary minute read as a spike.
+	svc, notifier, _ := newService(t)
+	b := base()
+
+	for i := 1; i <= 60; i++ {
+		advance(svc, b.Add(time.Duration(i)*time.Minute), 100)
+	}
+	// Five more ordinary minutes, each with its trade arriving 50 seconds in.
+	for i := 61; i <= 65; i++ {
+		m := b.Add(time.Duration(i) * time.Minute)
+		svc.engine.Ingest(domain.Trade{
+			Timestamp: m.Add(50 * time.Second), Chain: testToken.Chain,
+			TokenAddress: testToken.Address, TxHash: m.String(), LogIndex: 0,
+			Side: domain.SideBuy, USDVolume: 100,
+		})
+		svc.health.record(testToken.Chain, m.Add(30*time.Second), true)
+		seal(svc, m)
+
+		snap := svc.engine.Snapshot(testToken, m)
+		if snap.Current.Total != 100 {
+			t.Fatalf("minute %d recorded %v, want the late trade counted", i, snap.Current.Total)
+		}
+	}
+
+	advance(svc, b.Add(66*time.Minute), 100)
+	if notifier.count() != 0 {
+		t.Fatalf("a flat series must never alert, got %d:\n%s",
+			notifier.count(), notifier.sent[0].Text)
 	}
 }

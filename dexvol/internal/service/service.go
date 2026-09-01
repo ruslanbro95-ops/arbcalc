@@ -230,8 +230,17 @@ func (s *Service) sealLoop(ctx context.Context) {
 // most recent one, so a pause — a laptop asleep, a long GC, a slow restart —
 // closes the minutes it skipped instead of leaving holes that would silently
 // shrink every median's sample set.
+//
+// The extra minute subtracted below is the whole point of the arithmetic:
+// minute m spans [m, m+1min), so it is complete only at m+1min, and the grace
+// period runs from there. Truncating `now - SealDelay` alone sealed m as early
+// as m+SealDelay — a third of the way into a minute that was still filling —
+// and every trade in its remaining forty seconds was then rejected as late.
+// Worse than the lost volume, such a minute sealed QualityOK at $0 because the
+// poll behind it had succeeded, so fake zeros entered the medians and the next
+// ordinary minute read as a spike.
 func (s *Service) sealDue(ctx context.Context, now time.Time) {
-	deadlineMinute := now.Add(-s.static.SealDelay).Truncate(time.Minute)
+	deadlineMinute := now.Add(-s.static.SealDelay).Add(-time.Minute).Truncate(time.Minute)
 
 	s.mu.RLock()
 	last := s.lastSealed

@@ -19,7 +19,7 @@ Go, без внешних зависимостей. Нужен только ко
 | Дедупликация | `internal/dedup` | 3 |
 | Минутная агрегация + медианы | `internal/volume` | 13 |
 | Детектор аномалий | `internal/detect` | 6 |
-| Cooldown / анти-спам / формат алерта | `internal/alert` | 31 |
+| Cooldown / анти-спам / формат алерта | `internal/alert` | 33 |
 | Приватный Telegram-бот | `internal/telegram` | 9 |
 | Keccak-256 + ABI + декодер Swap | `internal/evm` | 19 |
 | Ingestion EVM (ETH/BNB/Base/Robinhood) | `internal/sources/evmrpc` | 9 |
@@ -30,7 +30,7 @@ Go, без внешних зависимостей. Нужен только ко
 | Кэш цен | `internal/service` | 5 |
 | Учёт качества данных по минутам | `internal/service` | 6 |
 | Хранилище + восстановление после рестарта | `internal/store` | 9 |
-| Оркестратор (сквозные сценарии) | `internal/service` | 7 |
+| Оркестратор (сквозные сценарии) | `internal/service` | 11 |
 | Бэкфилл истории за 24ч | `internal/service` | 9 |
 | Реестр сетей | `internal/domain` | — |
 | Coverage Test | `cmd/coverage` | 4 |
@@ -346,7 +346,7 @@ export OKX_URL_TEMPLATE=""     # пустое значение убирает к
 ## Разработка
 
 ```bash
-go test ./...          # 173 теста
+go test ./...          # 177 тестов
 go vet ./...
 gofmt -l .             # должно быть пусто
 ```

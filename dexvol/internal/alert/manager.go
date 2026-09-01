@@ -91,9 +91,15 @@ type state struct {
 	// like a decline and is suppressed. Compared against its own opening
 	// value, it is what it is.
 	anchor map[int]float64
-	// step is the highest rung of the escalation ladder already announced for
-	// each window, counted in multiples of its anchor.
-	step map[int]int
+	// announced is the highest percentage already reported for each window.
+	//
+	// The rung it corresponds to is recomputed on demand rather than stored,
+	// so that changing /escalation mid-episode re-reads both sides of the
+	// comparison on the new ladder. Storing a rung count instead leaves a
+	// number measured on the old one: after a change from 1.5 to 3.0, a window
+	// sitting on rung 3 of the finer ladder needs rung 4 of the coarser one,
+	// and a jump from +200% to +900% is silently swallowed.
+	announced map[int]float64
 }
 
 // Manager enforces cooldown and deduplication across alerts.
@@ -147,7 +153,7 @@ func (m *Manager) Decide(key string, res detect.Result, now time.Time, p Policy)
 	}
 	if len(fresh) > 0 {
 		st.lastAlert = now
-		st.record(exceeded, p.EscalationFactor)
+		st.record(exceeded)
 		return Decision{Send: true, Reason: ReasonNewTrigger, NewWindows: fresh}
 	}
 
@@ -157,13 +163,15 @@ func (m *Manager) Decide(key string, res detect.Result, now time.Time, p Policy)
 	var escalated []WindowGrowth
 	for _, ch := range exceeded {
 		a := st.anchor[ch.Window]
-		if rungsCleared(ch.Pct, a, p.EscalationFactor) > st.step[ch.Window] {
+		reached := rungsCleared(ch.Pct, a, p.EscalationFactor)
+		shown := rungsCleared(st.announced[ch.Window], a, p.EscalationFactor)
+		if reached > shown {
 			escalated = append(escalated, WindowGrowth{Window: ch.Window, Multiple: ch.Pct / a})
 		}
 	}
 	if len(escalated) > 0 {
 		st.lastAlert = now
-		st.record(exceeded, p.EscalationFactor)
+		st.record(exceeded)
 		return Decision{Send: true, Reason: ReasonEscalation, Escalated: escalated}
 	}
 
@@ -171,9 +179,13 @@ func (m *Manager) Decide(key string, res detect.Result, now time.Time, p Policy)
 }
 
 func newEpisode(exceeded []detect.Change) *state {
-	st := &state{anchor: make(map[int]float64, len(exceeded)), step: map[int]int{}}
+	st := &state{
+		anchor:    make(map[int]float64, len(exceeded)),
+		announced: make(map[int]float64, len(exceeded)),
+	}
 	for _, ch := range exceeded {
 		st.anchor[ch.Window] = ch.Pct
+		st.announced[ch.Window] = ch.Pct
 	}
 	return st
 }
@@ -184,17 +196,16 @@ func newEpisode(exceeded []detect.Change) *state {
 // lists them all, so the owner has now seen each of those numbers and none of
 // them should immediately re-announce the same rung. Anchors are never touched
 // here — that is the point of anchoring on the opening alert.
-func (s *state) record(exceeded []detect.Change, factor float64) {
+func (s *state) record(exceeded []detect.Change) {
 	for _, ch := range exceeded {
-		a, seen := s.anchor[ch.Window]
-		if !seen {
+		if _, seen := s.anchor[ch.Window]; !seen {
 			// A window joining mid-episode anchors where it first crossed.
 			s.anchor[ch.Window] = ch.Pct
-			s.step[ch.Window] = 0
+			s.announced[ch.Window] = ch.Pct
 			continue
 		}
-		if n := rungsCleared(ch.Pct, a, factor); n > s.step[ch.Window] {
-			s.step[ch.Window] = n
+		if ch.Pct > s.announced[ch.Window] {
+			s.announced[ch.Window] = ch.Pct
 		}
 	}
 }

@@ -346,3 +346,47 @@ func TestRungsCleared(t *testing.T) {
 		}
 	}
 }
+
+func TestRaisingTheFactorMidEpisodeStillLetsABigJumpThrough(t *testing.T) {
+	// The owner runs /escalation 3 partway through an episode. The window has
+	// already been reported at +200%, which was rung 3 of the old 1.5 ladder.
+	// Carrying that rung count over to the coarser ladder would demand rung 4
+	// of it — over +1080% — and swallow a jump to +900%.
+	//
+	// Recomputing both sides on the current factor keeps the comparison honest:
+	// +200% is rung 1 of the 3.0 ladder, +900% is rung 2, so it sends.
+	m := NewManager()
+	loose := Policy{Cooldown: 5 * time.Minute, EscalationFactor: 1.5}
+	tight := Policy{Cooldown: 5 * time.Minute, EscalationFactor: 3.0}
+
+	m.Decide("k", daily(40), base(), loose)
+	if d := m.Decide("k", daily(200), base().Add(time.Minute), loose); !d.Send {
+		t.Fatal("+200% should escalate on the 1.5 ladder")
+	}
+
+	d := m.Decide("k", daily(900), base().Add(2*time.Minute), tight)
+	if !d.Send || d.Reason != ReasonEscalation {
+		t.Fatalf("+900%% after a factor change must still send, got %+v", d)
+	}
+	// And the coarser ladder then holds: +1000% is still rung 2.
+	if d := m.Decide("k", daily(1000), base().Add(3*time.Minute), tight); d.Send {
+		t.Fatalf("the same rung must not re-announce, got %s", d.Reason)
+	}
+}
+
+func TestLoweringTheFactorMidEpisodeIsAlsoConsistent(t *testing.T) {
+	// The mirror direction: a finer ladder must not replay rungs the owner has
+	// already been shown.
+	m := NewManager()
+	tight := Policy{Cooldown: 5 * time.Minute, EscalationFactor: 3.0}
+	loose := Policy{Cooldown: 5 * time.Minute, EscalationFactor: 1.5}
+
+	m.Decide("k", daily(40), base(), tight)
+	if d := m.Decide("k", daily(400), base().Add(time.Minute), tight); !d.Send {
+		t.Fatal("+400% should escalate on the 3.0 ladder")
+	}
+	// On the 1.5 ladder +400% is rung 5, already covered by what was shown.
+	if d := m.Decide("k", daily(410), base().Add(2*time.Minute), loose); d.Send {
+		t.Fatalf("a finer ladder must not re-announce a level already reported, got %s", d.Reason)
+	}
+}
