@@ -30,13 +30,14 @@ const rateLimit = 280
 // instead of four per token.
 const BatchSize = 30
 
-// chainID maps our chain to the DEX Screener identifier.
-var chainID = map[domain.Chain]string{
-	domain.ChainEthereum:  "ethereum",
-	domain.ChainBNB:       "bsc",
-	domain.ChainSolana:    "solana",
-	domain.ChainBase:      "base",
-	domain.ChainRobinhood: "robinhood",
+// chainID resolves the DEX Screener identifier from the shared chain registry,
+// so a network added there needs no edit here.
+func chainID(c domain.Chain) (string, bool) {
+	info, ok := domain.Info(c)
+	if !ok || info.DexScreenerID == "" {
+		return "", false
+	}
+	return info.DexScreenerID, true
 }
 
 // Client talks to DEX Screener.
@@ -90,7 +91,7 @@ type tokensResponse struct {
 
 // DiscoverPools returns every pool DEX Screener knows for the token.
 func (c *Client) DiscoverPools(ctx context.Context, tok domain.Token) ([]domain.Pool, error) {
-	id, ok := chainID[tok.Chain]
+	id, ok := chainID(tok.Chain)
 	if !ok {
 		return nil, fmt.Errorf("dexscreener: unsupported chain %q", tok.Chain)
 	}
@@ -137,7 +138,7 @@ func (c *Client) Prices(ctx context.Context, toks []domain.Token) (map[string]fl
 	}
 
 	for chain, list := range byChain {
-		if _, ok := chainID[chain]; !ok {
+		if _, ok := chainID(chain); !ok {
 			continue
 		}
 		for start := 0; start < len(list); start += BatchSize {
@@ -181,7 +182,7 @@ func (c *Client) Volume(ctx context.Context, tok domain.Token) (sources.Referenc
 		return sources.Reference{}, err
 	}
 
-	id := chainID[tok.Chain]
+	id, _ := chainID(tok.Chain)
 	endpoint := fmt.Sprintf("%s/token-pairs/v1/%s/%s", c.baseURL, id, url.PathEscape(tok.Address))
 	var pairs []pair
 	if err := c.http.GetJSON(ctx, endpoint, &pairs); err != nil {

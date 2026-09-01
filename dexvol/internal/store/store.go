@@ -34,6 +34,9 @@ type MinuteRow struct {
 	// Quality is persisted so a restart cannot resurrect an outage as a real
 	// zero. Losing it would poison the restored medians.
 	Quality volume.Quality `json:"quality"`
+	// Backfilled travels with the row so a restart does not refetch history it
+	// already has, and so the provenance of a baseline survives too.
+	Backfilled bool `json:"backfilled,omitempty"`
 }
 
 // Store owns the on-disk state.
@@ -262,14 +265,15 @@ func (s *Store) Restore(eng *volume.Engine, tokens []domain.Token, now time.Time
 		if !wanted[row.TokenKey] {
 			continue
 		}
-		if err := eng.RestoreMinute(row.TokenKey, volume.Bucket{
-			Minute:  row.Minute.UTC(),
-			Buy:     row.Buy,
-			Sell:    row.Sell,
-			Total:   row.Total,
-			Trades:  row.Trades,
-			Quality: row.Quality,
-			Sealed:  true,
+		if _, err := eng.RestoreMinute(row.TokenKey, volume.Bucket{
+			Minute:     row.Minute.UTC(),
+			Buy:        row.Buy,
+			Sell:       row.Sell,
+			Total:      row.Total,
+			Trades:     row.Trades,
+			Quality:    row.Quality,
+			Sealed:     true,
+			Backfilled: row.Backfilled,
 		}); err != nil {
 			return n, fmt.Errorf("restore %s at %s: %w", row.TokenKey, row.Minute, err)
 		}

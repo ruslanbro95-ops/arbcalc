@@ -3,6 +3,8 @@ package geckoterminal
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,5 +112,76 @@ func TestTradesNormalization(t *testing.T) {
 	// Distinct positions keep two trades in one response from colliding.
 	if trades[0].DedupKey() == trades[1].DedupKey() {
 		t.Fatal("dedup keys must differ")
+	}
+}
+
+const ohlcvBody = `{"data":{"attributes":{"ohlcv_list":[
+ [1788609600, 1.20, 1.25, 1.19, 1.24, 5000],
+ [1788609540, "1.18", "1.21", "1.17", "1.20", "3200.5"],
+ [1788609480, 1.15, 1.19, 1.14, 1.18, 0],
+ [1788609420]
+]}}}`
+
+func TestOHLCVMinuteParsesMixedNumberAndStringFields(t *testing.T) {
+	// GeckoTerminal quotes some numerics and not others. A strict decode into
+	// float64 would silently drop whichever form it did not expect, and a
+	// dropped candle is an understated backfilled minute.
+	c := stub(t, ohlcvBody)
+	pool := domain.Pool{Chain: domain.ChainBase, Address: "0xPOOL1"}
+
+	got, err := c.OHLCVMinute(t.Context(), pool, 0, time.Unix(1788609660, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fourth row is truncated and cannot be read as a candle.
+	if len(got) != 3 {
+		t.Fatalf("got %d candles, want 3", len(got))
+	}
+	if got[0].VolumeUSD != 5000 {
+		t.Fatalf("numeric volume = %v, want 5000", got[0].VolumeUSD)
+	}
+	if got[1].VolumeUSD != 3200.5 {
+		t.Fatalf("quoted volume = %v, want 3200.5", got[1].VolumeUSD)
+	}
+	if got[1].Close != 1.20 {
+		t.Fatalf("quoted close = %v, want 1.20", got[1].Close)
+	}
+	// A zero-volume candle is real data — the minute traded nothing — and must
+	// survive rather than be filtered out as noise.
+	if got[2].VolumeUSD != 0 {
+		t.Fatalf("zero-volume candle = %v", got[2].VolumeUSD)
+	}
+	want := time.Unix(1788609600, 0).UTC()
+	if !got[0].Time.Equal(want) {
+		t.Fatalf("time = %v, want %v", got[0].Time, want)
+	}
+}
+
+func TestOHLCVMinuteRequestsUSDAndPagesBackwards(t *testing.T) {
+	var gotURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.String()
+		w.Write([]byte(ohlcvBody))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewWithBase(srv.URL)
+
+	before := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := c.OHLCVMinute(t.Context(), domain.Pool{Chain: domain.ChainBase, Address: "0xP"}, 0, before); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"aggregate=1", "currency=usd", "limit=1000",
+		"before_timestamp=" + strconv.FormatInt(before.Unix(), 10)} {
+		if !strings.Contains(gotURL, want) {
+			t.Errorf("request %q missing %q", gotURL, want)
+		}
+	}
+}
+
+func TestOHLCVUnsupportedChainIsAnError(t *testing.T) {
+	c := stub(t, ohlcvBody)
+	_, err := c.OHLCVMinute(t.Context(), domain.Pool{Chain: domain.ChainRobinhood, Address: "0xP"}, 0, time.Now())
+	if err == nil {
+		t.Fatal("a chain with no network id must fail loudly, not return an empty history")
 	}
 }

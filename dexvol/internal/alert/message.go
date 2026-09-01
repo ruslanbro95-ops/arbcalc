@@ -56,6 +56,14 @@ func Render(res detect.Result) Message {
 		fmt.Fprintf(&b, "\n⚠ data %d/%dm", res.Snap.HealthyMinutes, res.Snap.TotalMinutes)
 	}
 
+	// A baseline drawn mostly from an aggregator's history is not measured by
+	// the same ruler as the live minute above it. Early after a start, or right
+	// after a token is added, that is most alerts — and it is exactly when a
+	// reader should weigh the number a little more carefully.
+	if res.Primary.Samples > 0 && res.Primary.Backfilled*2 > res.Primary.Samples {
+		fmt.Fprintf(&b, "\n⚠ baseline mostly from history")
+	}
+
 	return Message{Text: b.String(), Links: Links(res.Token)}
 }
 

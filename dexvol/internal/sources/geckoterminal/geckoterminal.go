@@ -11,6 +11,7 @@ package geckoterminal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -27,16 +28,18 @@ const DefaultBaseURL = "https://api.geckoterminal.com/api/v2"
 // does not cross the line.
 const rateLimit = 25
 
-// network maps our chain to GeckoTerminal's network id.
+// networkID resolves GeckoTerminal's network id from the shared chain registry.
 //
-// Robinhood Chain is deliberately absent: its GeckoTerminal network id could
-// not be confirmed while this was built, and inventing one would produce silent
-// 404s that look like "no pools" instead of "unsupported".
-var network = map[domain.Chain]string{
-	domain.ChainEthereum: "eth",
-	domain.ChainBNB:      "bsc",
-	domain.ChainSolana:   "solana",
-	domain.ChainBase:     "base",
+// A chain whose id is blank there — Robinhood Chain, whose id could not be
+// confirmed — reports as unsupported. Guessing one would produce silent 404s
+// that read like "this token has no pools" rather than "this chain is not
+// covered".
+func networkID(c domain.Chain) (string, bool) {
+	info, ok := domain.Info(c)
+	if !ok || info.GeckoTerminalID == "" {
+		return "", false
+	}
+	return info.GeckoTerminalID, true
 }
 
 type Client struct {
@@ -57,7 +60,7 @@ func (c *Client) Name() string { return "geckoterminal" }
 
 // Supports reports whether the chain has a known GeckoTerminal network id.
 func (c *Client) Supports(chain domain.Chain) bool {
-	_, ok := network[chain]
+	_, ok := networkID(chain)
 	return ok
 }
 
@@ -109,7 +112,7 @@ func parseFloat(s string) float64 {
 // DiscoverPools returns the token's pools as GeckoTerminal sees them. It is the
 // second opinion that catches a pool DEX Screener missed.
 func (c *Client) DiscoverPools(ctx context.Context, tok domain.Token) ([]domain.Pool, error) {
-	net, ok := network[tok.Chain]
+	net, ok := networkID(tok.Chain)
 	if !ok {
 		return nil, fmt.Errorf("geckoterminal: no network id for chain %q", tok.Chain)
 	}
@@ -143,7 +146,7 @@ func (c *Client) DiscoverPools(ctx context.Context, tok domain.Token) ([]domain.
 
 // Volume sums GeckoTerminal's per-pool aggregates for the token.
 func (c *Client) Volume(ctx context.Context, tok domain.Token) (sources.Reference, error) {
-	net, ok := network[tok.Chain]
+	net, ok := networkID(tok.Chain)
 	if !ok {
 		return sources.Reference{}, fmt.Errorf("geckoterminal: no network id for chain %q", tok.Chain)
 	}
@@ -198,7 +201,7 @@ type tradesResponse struct {
 // This is a verification tool, not an ingestion path: see the package comment
 // for why the rate limit rules it out for continuous polling.
 func (c *Client) Trades(ctx context.Context, pool domain.Pool, tok domain.Token) ([]domain.Trade, error) {
-	net, ok := network[pool.Chain]
+	net, ok := networkID(pool.Chain)
 	if !ok {
 		return nil, fmt.Errorf("geckoterminal: no network id for chain %q", pool.Chain)
 	}
@@ -238,6 +241,121 @@ func (c *Client) Trades(ctx context.Context, pool domain.Pool, tok domain.Token)
 			Price:       parseFloat(d.Attributes.PriceToInUSD),
 			Source:      c.Name(),
 		})
+	}
+	return out, nil
+}
+
+// MaxOHLCVLimit is the largest page the OHLCV endpoint serves. Two pages cover
+// more than the 1,440 minutes in a day, so a full 24h backfill costs at most
+// two requests per pool.
+const MaxOHLCVLimit = 1000
+
+type ohlcvResponse struct {
+	Data struct {
+		Attributes struct {
+			// Each entry is [timestamp, open, high, low, close, volume].
+			OHLCVList [][]json.RawMessage `json:"ohlcv_list"`
+		} `json:"attributes"`
+	} `json:"data"`
+}
+
+// OHLCVMinute returns one-minute candles for a pool, newest first, ending at
+// `before`.
+//
+// Volume is requested in USD so it lands in the same unit the live pipeline
+// produces; asking for token-denominated volume would mean re-pricing every
+// historical minute at a price we no longer know.
+func (c *Client) OHLCVMinute(ctx context.Context, pool domain.Pool, limit int, before time.Time) ([]sources.Candle, error) {
+	net, ok := networkID(pool.Chain)
+	if !ok {
+		return nil, fmt.Errorf("geckoterminal: no network id for chain %q", pool.Chain)
+	}
+	if limit <= 0 || limit > MaxOHLCVLimit {
+		limit = MaxOHLCVLimit
+	}
+
+	endpoint := fmt.Sprintf("%s/networks/%s/pools/%s/ohlcv/minute?aggregate=1&limit=%d&currency=usd",
+		c.baseURL, net, url.PathEscape(pool.Address), limit)
+	if !before.IsZero() {
+		// The API takes epoch seconds, not milliseconds.
+		endpoint += fmt.Sprintf("&before_timestamp=%d", before.UTC().Unix())
+	}
+
+	var resp ohlcvResponse
+	if err := c.http.GetJSON(ctx, endpoint, &resp); err != nil {
+		return nil, err
+	}
+
+	out := make([]sources.Candle, 0, len(resp.Data.Attributes.OHLCVList))
+	for _, row := range resp.Data.Attributes.OHLCVList {
+		if len(row) < 6 {
+			continue
+		}
+		ts := int64(rawFloat(row[0]))
+		if ts <= 0 {
+			continue
+		}
+		out = append(out, sources.Candle{
+			Time:      time.Unix(ts, 0).UTC(),
+			Open:      rawFloat(row[1]),
+			High:      rawFloat(row[2]),
+			Low:       rawFloat(row[3]),
+			Close:     rawFloat(row[4]),
+			VolumeUSD: rawFloat(row[5]),
+		})
+	}
+	return out, nil
+}
+
+// rawFloat reads a JSON value that may arrive as a number or as a string.
+// GeckoTerminal quotes some numerics and not others, and a strict decode into
+// float64 would drop whole candles depending on which form it chose.
+func rawFloat(raw json.RawMessage) float64 {
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return f
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return 0
+	}
+	return parseFloat(s)
+}
+
+// Network is one entry from the provider's network list.
+type Network struct {
+	ID   string
+	Name string
+}
+
+// Networks returns every network GeckoTerminal indexes.
+//
+// The chain registry hardcodes these ids, and a wrong one is the quietest
+// possible failure: requests 404, the adapter reports no pools, and the chain
+// silently loses its second discovery opinion and its history backfill without
+// anything looking broken. `cmd/coverage -verify-networks` checks the registry
+// against this list.
+func (c *Client) Networks(ctx context.Context, maxPages int) ([]Network, error) {
+	var out []Network
+	for page := 1; page <= maxPages; page++ {
+		var resp struct {
+			Data []struct {
+				ID         string `json:"id"`
+				Attributes struct {
+					Name string `json:"name"`
+				} `json:"attributes"`
+			} `json:"data"`
+		}
+		endpoint := fmt.Sprintf("%s/networks?page=%d", c.baseURL, page)
+		if err := c.http.GetJSON(ctx, endpoint, &resp); err != nil {
+			return out, err
+		}
+		if len(resp.Data) == 0 {
+			break
+		}
+		for _, d := range resp.Data {
+			out = append(out, Network{ID: d.ID, Name: d.Attributes.Name})
+		}
 	}
 	return out, nil
 }

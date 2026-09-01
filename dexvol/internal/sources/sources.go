@@ -53,6 +53,31 @@ type Reference struct {
 	RetrievedAt time.Time
 }
 
+// Candle is one OHLCV bar. Only the timestamp and the USD volume are used, but
+// the close price is kept because it makes a backfilled series inspectable
+// against a chart when a number looks wrong.
+type Candle struct {
+	Time      time.Time
+	Open      float64
+	High      float64
+	Low       float64
+	Close     float64
+	VolumeUSD float64
+}
+
+// HistorySource supplies per-minute history for a pool.
+//
+// This is what makes a freshly started service useful immediately: without it
+// the 24h baseline — the one the spec leans on most — would need a full day of
+// live collection before it could judge anything, and a token added today would
+// be unjudgeable until tomorrow.
+type HistorySource interface {
+	Name() string
+	Supports(chain domain.Chain) bool
+	// OHLCVMinute returns one-minute candles ending at `before`, newest first.
+	OHLCVMinute(ctx context.Context, pool domain.Pool, limit int, before time.Time) ([]Candle, error)
+}
+
 // TradeSource streams normalized trades for the pools it was given.
 //
 // Implementations must report health honestly through Healthy: the engine turns

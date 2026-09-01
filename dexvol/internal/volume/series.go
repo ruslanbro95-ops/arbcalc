@@ -35,6 +35,16 @@ type Bucket struct {
 	// Sealed is set once the minute is complete and can no longer receive
 	// trades. Only sealed buckets feed baselines.
 	Sealed bool
+	// Backfilled marks a minute reconstructed from an aggregator's historical
+	// candles rather than observed live.
+	//
+	// It is tracked rather than hidden because the two numbers are not
+	// produced the same way: a backfilled minute is the provider's own USD
+	// figure, a live minute is this pipeline's. Mixing them in one median is
+	// worth doing — it makes the 24h baseline usable on day one instead of day
+	// two — but a baseline built mostly from history deserves to say so before
+	// an alert is acted on.
+	Backfilled bool
 }
 
 // Window sizes, in minutes, for the baselines the spec requires.
@@ -63,6 +73,9 @@ type Baseline struct {
 	WindowMinutes int
 	Median        float64
 	Samples       int
+	// Backfilled is how many of those samples came from historical candles
+	// rather than from live observation.
+	Backfilled int
 	// Usable is false when there were not enough healthy samples, or the
 	// median came out at zero. Callers must not raise alerts on it.
 	Usable bool
@@ -176,16 +189,21 @@ func (s *Series) BaselineFor(endExclusive time.Time, window int) Baseline {
 
 	s.mu.RLock()
 	vals := make([]float64, 0, window)
+	backfilled := 0
 	for i := 1; i <= window; i++ {
 		b := s.buckets[minuteKey(end.Add(-time.Duration(i)*time.Minute))]
 		if b == nil || !b.Sealed || b.Quality != QualityOK {
 			continue
 		}
 		vals = append(vals, b.Total)
+		if b.Backfilled {
+			backfilled++
+		}
 	}
 	s.mu.RUnlock()
 
 	out.Samples = len(vals)
+	out.Backfilled = backfilled
 	out.Median = Median(vals)
 	out.Usable = out.Samples >= MinSamples[window] && out.Median > 0
 	return out
@@ -211,24 +229,41 @@ func (s *Series) Health(endExclusive time.Time, window int) (healthy, total int)
 	return healthy, total
 }
 
+// SealedCount reports how many of the `window` minutes before `endExclusive`
+// are already sealed, regardless of quality. Backfill uses it to decide whether
+// a token still needs history fetched.
+func (s *Series) SealedCount(endExclusive time.Time, window int) int {
+	end := endExclusive.UTC().Truncate(time.Minute)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	n := 0
+	for i := 1; i <= window; i++ {
+		if b := s.buckets[minuteKey(end.Add(-time.Duration(i)*time.Minute))]; b != nil && b.Sealed {
+			n++
+		}
+	}
+	return n
+}
+
 // restore inserts an already-sealed bucket, used when replaying persisted
 // state at startup. It refuses to overwrite a bucket the live feed has already
 // produced, so a slow restore cannot clobber fresher data.
-func (s *Series) restore(b Bucket) error {
+func (s *Series) restore(b Bucket) (bool, error) {
 	if !b.Sealed {
-		return fmt.Errorf("restore: bucket for %s is not sealed", b.Minute)
+		return false, fmt.Errorf("restore: bucket for %s is not sealed", b.Minute)
 	}
 	k := minuteKey(b.Minute)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.buckets[k]; exists {
-		return nil
+		return false, nil
 	}
 	cp := b
 	cp.Minute = b.Minute.UTC().Truncate(time.Minute)
 	s.buckets[k] = &cp
-	return nil
+	return true, nil
 }
 
 // Sum totals the sealed, healthy minutes in [from, to).

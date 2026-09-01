@@ -107,17 +107,11 @@ func LoadStatic() (Static, error) {
 	}
 	s.OwnerID = id
 
-	// Public defaults let the service start with no accounts anywhere; any of
-	// them can be swapped for a private endpoint with a higher rate limit.
-	defaults := map[domain.Chain]struct{ env, url string }{
-		domain.ChainEthereum:  {"RPC_ETHEREUM", "https://ethereum-rpc.publicnode.com"},
-		domain.ChainBNB:       {"RPC_BSC", "https://bsc-rpc.publicnode.com"},
-		domain.ChainBase:      {"RPC_BASE", "https://base-rpc.publicnode.com"},
-		domain.ChainRobinhood: {"RPC_ROBINHOOD", "https://rpc.mainnet.chain.robinhood.com"},
-		domain.ChainSolana:    {"RPC_SOLANA", "https://api.mainnet-beta.solana.com"},
-	}
-	for chain, d := range defaults {
-		s.RPCEndpoints[chain] = envStr(d.env, d.url)
+	// Endpoints come from the chain registry, so adding a network there also
+	// gives it an RPC_* override with a working public default. Public
+	// endpoints are rate limited; point these at your own for headroom.
+	for _, info := range domain.Chains() {
+		s.RPCEndpoints[info.Chain] = envStr(info.RPCEnv, info.DefaultRPC)
 	}
 	return s, nil
 }

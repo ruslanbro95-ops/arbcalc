@@ -72,6 +72,12 @@ func run() error {
 
 	svc := service.New(static, settings, db, engine, discovery, prices, alerts, sources, log)
 
+	// GeckoTerminal is the history provider: its minute OHLCV endpoint is the
+	// only free source of per-minute volume with enough depth, and two pages
+	// cover a full day per pool. Without this the 24h median needs a day of
+	// live collection before it can judge anything.
+	svc.SetBackfiller(service.NewBackfiller(gt, engine, db, service.DefaultBackfillOptions(), log))
+
 	client := telegram.NewClient(static.TelegramToken)
 	bot := telegram.NewBot(client, static.OwnerID, settings, alerts, svc, log)
 	svc.SetNotifier(bot)

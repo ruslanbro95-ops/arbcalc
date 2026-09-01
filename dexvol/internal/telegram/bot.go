@@ -130,6 +130,8 @@ func (b *Bot) dispatch(cmd string, args []string) (string, error) {
 		return b.cmdRemove(args)
 	case "/list":
 		return b.cmdList()
+	case "/chains":
+		return b.cmdChains()
 	case "/threshold":
 		return b.cmdThreshold(args)
 	case "/cooldown":
@@ -173,30 +175,12 @@ Service
 /settings                 current configuration
 /status                   ingestion and data quality
 /vol <symbol>             volume right now
-
-Chains: ethereum, bsc, solana, base, robinhood`
+/chains                   supported networks`
 
 var (
 	evmAddr    = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 	solanaAddr = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{32,44}$`)
 )
-
-// parseChain accepts the short aliases a person actually types.
-func parseChain(s string) (domain.Chain, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "eth", "ethereum":
-		return domain.ChainEthereum, nil
-	case "bsc", "bnb", "bnbchain":
-		return domain.ChainBNB, nil
-	case "sol", "solana":
-		return domain.ChainSolana, nil
-	case "base":
-		return domain.ChainBase, nil
-	case "rh", "robinhood":
-		return domain.ChainRobinhood, nil
-	}
-	return "", fmt.Errorf("unknown chain %q — use ethereum, bsc, solana, base or robinhood", s)
-}
 
 // validateAddress catches a mistyped address at entry instead of letting it
 // become a token that silently never produces data.
@@ -217,7 +201,7 @@ func (b *Bot) cmdAdd(args []string) (string, error) {
 	if len(args) < 2 {
 		return "", errors.New("usage: /add <chain> <address> [SYMBOL]")
 	}
-	chain, err := parseChain(args[0])
+	chain, err := domain.ParseChain(args[0])
 	if err != nil {
 		return "", err
 	}
@@ -291,6 +275,32 @@ func (b *Bot) cmdRemove(args []string) (string, error) {
 	sb.WriteString("removed:")
 	for _, t := range removed {
 		fmt.Fprintf(&sb, "\n%s", t.Key())
+	}
+	return sb.String(), nil
+}
+
+// cmdChains lists what the registry supports and how well each network is
+// covered, so the owner can see before adding a token whether it will get one
+// discovery provider or two, and whether history can be backfilled.
+func (b *Bot) cmdChains() (string, error) {
+	var sb strings.Builder
+	sb.WriteString("supported networks:")
+	for _, info := range domain.Chains() {
+		providers := 0
+		if info.DexScreenerID != "" {
+			providers++
+		}
+		if info.GeckoTerminalID != "" {
+			providers++
+		}
+		note := ""
+		if info.GeckoTerminalID == "" {
+			// Backfill and the second discovery opinion both ride on
+			// GeckoTerminal, so its absence is worth stating up front.
+			note = " · 1 provider, no history backfill"
+		}
+		fmt.Fprintf(&sb, "\n%s%s", info.Chain, note)
+		_ = providers
 	}
 	return sb.String(), nil
 }
@@ -473,7 +483,16 @@ func (b *Bot) cmdStatus() (string, error) {
 			fmt.Fprintf(&sb, "\n%s · warming up", labelOf(t))
 			continue
 		}
-		fmt.Fprintf(&sb, "\n%s · %d/%dm healthy", labelOf(t), snap.HealthyMinutes, snap.TotalMinutes)
+		day := snap.Baselines[volume.Window24h]
+		history := "no 24h baseline yet"
+		if day.Usable {
+			history = fmt.Sprintf("24h baseline %d samples", day.Samples)
+			if day.Backfilled > 0 {
+				history += fmt.Sprintf(" (%d backfilled)", day.Backfilled)
+			}
+		}
+		fmt.Fprintf(&sb, "\n%s · %d/%dm healthy · %s",
+			labelOf(t), snap.HealthyMinutes, snap.TotalMinutes, history)
 	}
 	return sb.String(), nil
 }
@@ -510,8 +529,14 @@ func (b *Bot) cmdVol(args []string) (string, error) {
 				continue
 			}
 			pct, _ := volume.PercentChange(snap.Current.Total, bl.Median)
-			fmt.Fprintf(&sb, "\n%s median %s · %s",
-				alert.FormatWindow(w), alert.FormatUSD(bl.Median), alert.FormatPct(pct))
+			// Showing the historical share makes it obvious when a baseline is
+			// still the aggregator's view rather than this pipeline's.
+			origin := ""
+			if bl.Backfilled > 0 {
+				origin = fmt.Sprintf(" · %d/%d from history", bl.Backfilled, bl.Samples)
+			}
+			fmt.Fprintf(&sb, "\n%s median %s · %s%s",
+				alert.FormatWindow(w), alert.FormatUSD(bl.Median), alert.FormatPct(pct), origin)
 		}
 		return sb.String(), nil
 	}

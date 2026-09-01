@@ -45,6 +45,7 @@ type Service struct {
 	alerts    *alert.Manager
 	sources   map[domain.Chain]TradeSource
 	health    *healthTracker
+	backfill  *Backfiller
 	log       *slog.Logger
 
 	notifier Notifier
@@ -56,6 +57,12 @@ type Service struct {
 	// rediscover is poked when the watch list changes, so a token added from
 	// Telegram starts collecting immediately instead of at the next refresh.
 	rediscover chan struct{}
+	// poolsByToken is the latest discovery result per watch-list entry, which
+	// the backfill loop needs to know which pools to pull history from.
+	poolsByToken map[string][]domain.Pool
+	// backfillDone records the tokens already attempted, so a chain with no
+	// history provider is not retried every thirty seconds forever.
+	backfillDone map[string]bool
 }
 
 func New(
@@ -70,20 +77,27 @@ func New(
 	log *slog.Logger,
 ) *Service {
 	return &Service{
-		static:     static,
-		settings:   settings,
-		db:         db,
-		engine:     engine,
-		discovery:  discovery,
-		prices:     prices,
-		alerts:     alerts,
-		sources:    sources,
-		health:     newHealthTracker(),
-		log:        log.With("component", "service"),
-		trades:     make(chan domain.Trade, tradeBuffer),
-		rediscover: make(chan struct{}, 1),
+		static:       static,
+		settings:     settings,
+		db:           db,
+		engine:       engine,
+		discovery:    discovery,
+		prices:       prices,
+		alerts:       alerts,
+		sources:      sources,
+		health:       newHealthTracker(),
+		log:          log.With("component", "service"),
+		trades:       make(chan domain.Trade, tradeBuffer),
+		rediscover:   make(chan struct{}, 1),
+		poolsByToken: map[string][]domain.Pool{},
+		backfillDone: map[string]bool{},
 	}
 }
+
+// SetBackfiller enables historical backfill. Without one the service still
+// works, but every median has to warm up from live data — a full day before the
+// 24h baseline can judge anything.
+func (s *Service) SetBackfiller(b *Backfiller) { s.backfill = b }
 
 // SetNotifier wires the alert channel. It is separate from New because the bot
 // needs the service as its controller, and the service needs the bot as its
@@ -106,6 +120,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.priceLoop,
 		s.sealLoop,
 		s.discoveryLoop,
+		s.backfillLoop,
 		s.maintenanceLoop,
 	}
 	for _, loop := range loops {
@@ -334,6 +349,10 @@ func (s *Service) runDiscovery(ctx context.Context) {
 	}
 	s.prices.TrackQuoteAssets(res.QuoteAssets)
 
+	s.mu.Lock()
+	s.poolsByToken = res.ByToken
+	s.mu.Unlock()
+
 	for provider, pools := range res.ExclusiveTo {
 		s.log.Info("pools found by only one provider",
 			"provider", provider, "count", len(pools))
@@ -360,6 +379,72 @@ func (s *Service) runDiscovery(ctx context.Context) {
 		total += len(pools)
 	}
 	s.log.Info("pool discovery complete", "tokens", len(rt.Tokens), "pools", total)
+}
+
+// backfillLoop fills each token's recent history, one token at a time.
+//
+// It runs apart from discovery so a slow fetch cannot stall pool refresh: a
+// full day of history for a token with a dozen pools is a couple of dozen
+// rate-limited requests, and serializing them keeps the provider's free tier
+// intact while the live pipeline keeps running underneath.
+func (s *Service) backfillLoop(ctx context.Context) {
+	if s.backfill == nil {
+		return
+	}
+	// A short tick: the first pass should land within seconds of startup,
+	// because until it does the 24h baseline cannot judge anything.
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.backfillNext(ctx)
+		}
+	}
+}
+
+// backfillNext fills at most one token per tick.
+func (s *Service) backfillNext(ctx context.Context) {
+	now := time.Now().UTC()
+
+	for _, tok := range s.settings.Get().Tokens {
+		if !tok.Enabled {
+			continue
+		}
+		s.mu.RLock()
+		done := s.backfillDone[tok.Key()]
+		pools := s.poolsByToken[tok.Key()]
+		s.mu.RUnlock()
+
+		if done || len(pools) == 0 || !s.backfill.Needed(tok, now) {
+			continue
+		}
+
+		rep := s.backfill.Run(ctx, tok, pools, now)
+		if ctx.Err() != nil {
+			return
+		}
+
+		s.mu.Lock()
+		// Marked done either way: a token whose chain has no history provider,
+		// or whose pool coverage is too thin to trust, must not be retried on
+		// every tick for the life of the process.
+		s.backfillDone[tok.Key()] = true
+		s.mu.Unlock()
+
+		if rep.Filled {
+			s.log.Info("history backfilled",
+				"token", tok.Key(), "minutes", rep.Minutes, "active_minutes", rep.Active,
+				"pools", rep.PoolsUsed, "volume_share", rep.VolumeShare)
+		} else {
+			s.log.Warn("history backfill skipped; medians will warm up from live data",
+				"token", tok.Key(), "reason", rep.Reason)
+		}
+		return // one token per tick
+	}
 }
 
 // maintenanceLoop trims persisted data and stale health records.
@@ -403,7 +488,15 @@ func (s *Service) Stats() volume.Stats { return s.engine.Stats() }
 
 // TokensChanged asks for a discovery pass without blocking the caller. The
 // buffered channel means a burst of edits collapses into one refresh.
+//
+// It also forgets which tokens were backfilled, so a token removed and re-added
+// — or one whose earlier attempt failed because discovery had not found its
+// pools yet — gets another try.
 func (s *Service) TokensChanged() {
+	s.mu.Lock()
+	s.backfillDone = map[string]bool{}
+	s.mu.Unlock()
+
 	select {
 	case s.rediscover <- struct{}{}:
 	default:

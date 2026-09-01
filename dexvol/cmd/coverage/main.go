@@ -52,12 +52,18 @@ func run() error {
 	var (
 		tokensFlag = flag.String("tokens", "",
 			"comma-separated chain:address[:SYMBOL] entries, e.g. base:0xabc...:ABC,solana:So111...:SOL")
-		duration      = flag.Duration("duration", time.Hour, "how long to collect before comparing")
-		discoveryOnly = flag.Bool("discovery-only", false, "compare pool sets and exit without collecting")
-		pollInterval  = flag.Duration("poll", 12*time.Second, "how often to poll for trades")
-		verbose       = flag.Bool("v", false, "debug logging")
+		duration       = flag.Duration("duration", time.Hour, "how long to collect before comparing")
+		discoveryOnly  = flag.Bool("discovery-only", false, "compare pool sets and exit without collecting")
+		pollInterval   = flag.Duration("poll", 12*time.Second, "how often to poll for trades")
+		verifyNetworks = flag.Bool("verify-networks", false,
+			"check the chain registry's GeckoTerminal ids against the live network list and exit")
+		verbose = flag.Bool("v", false, "debug logging")
 	)
 	flag.Parse()
+
+	if *verifyNetworks {
+		return runVerifyNetworks()
+	}
 
 	tokens, err := parseTokens(*tokensFlag)
 	if err != nil {
@@ -113,6 +119,50 @@ func run() error {
 	return reportCoverage(ctx, engine, tokens, res, ds, gt, start, end)
 }
 
+// runVerifyNetworks checks every GeckoTerminal id in the chain registry against
+// the provider's own list.
+//
+// A wrong id fails silently — requests 404, the adapter reports "no pools" —
+// so the chain loses its second discovery opinion and its history backfill
+// without anything looking broken. This turns that into a visible mismatch.
+func runVerifyNetworks() error {
+	ctx := context.Background()
+	live, err := geckoterminal.New().Networks(ctx, 20)
+	if err != nil {
+		return fmt.Errorf("fetch network list: %w", err)
+	}
+
+	known := make(map[string]string, len(live))
+	for _, n := range live {
+		known[n.ID] = n.Name
+	}
+
+	fmt.Printf("GeckoTerminal lists %d networks.\n\n", len(live))
+	fmt.Println("| Chain | Registry id | Status |")
+	fmt.Println("|---|---|---|")
+
+	problems := 0
+	for _, info := range domain.Chains() {
+		switch {
+		case info.GeckoTerminalID == "":
+			fmt.Printf("| %s | — | not configured (one discovery provider, no backfill) |\n", info.Chain)
+		case known[info.GeckoTerminalID] != "":
+			fmt.Printf("| %s | `%s` | ok — %s |\n", info.Chain, info.GeckoTerminalID, known[info.GeckoTerminalID])
+		default:
+			problems++
+			fmt.Printf("| %s | `%s` | **NOT FOUND** |\n", info.Chain, info.GeckoTerminalID)
+		}
+	}
+
+	if problems > 0 {
+		fmt.Printf("\n%d id(s) did not match. Fix chainRegistry in internal/domain/chains.go; "+
+			"search the list above for the right one.\n", problems)
+		return fmt.Errorf("%d network id(s) invalid", problems)
+	}
+	fmt.Println("\nEvery configured id resolves.")
+	return nil
+}
+
 // parseTokens reads the -tokens flag.
 func parseTokens(s string) ([]domain.Token, error) {
 	var out []domain.Token
@@ -125,7 +175,7 @@ func parseTokens(s string) ([]domain.Token, error) {
 		if len(parts) < 2 {
 			return nil, fmt.Errorf("token %q must look like chain:address[:SYMBOL]", entry)
 		}
-		chain, err := parseChain(parts[0])
+		chain, err := domain.ParseChain(parts[0])
 		if err != nil {
 			return nil, err
 		}
@@ -138,29 +188,10 @@ func parseTokens(s string) ([]domain.Token, error) {
 	return out, nil
 }
 
-func parseChain(s string) (domain.Chain, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "eth", "ethereum":
-		return domain.ChainEthereum, nil
-	case "bsc", "bnb":
-		return domain.ChainBNB, nil
-	case "sol", "solana":
-		return domain.ChainSolana, nil
-	case "base":
-		return domain.ChainBase, nil
-	case "rh", "robinhood":
-		return domain.ChainRobinhood, nil
-	}
-	return "", fmt.Errorf("unknown chain %q", s)
-}
-
 func buildSources(res service.DiscoveryResult, tokens []domain.Token, prices *service.PriceCache, log *slog.Logger) map[domain.Chain]service.TradeSource {
-	endpoints := map[domain.Chain]string{
-		domain.ChainEthereum:  env("RPC_ETHEREUM", "https://ethereum-rpc.publicnode.com"),
-		domain.ChainBNB:       env("RPC_BSC", "https://bsc-rpc.publicnode.com"),
-		domain.ChainBase:      env("RPC_BASE", "https://base-rpc.publicnode.com"),
-		domain.ChainRobinhood: env("RPC_ROBINHOOD", "https://rpc.mainnet.chain.robinhood.com"),
-		domain.ChainSolana:    env("RPC_SOLANA", "https://api.mainnet-beta.solana.com"),
+	endpoints := map[domain.Chain]string{}
+	for _, info := range domain.Chains() {
+		endpoints[info.Chain] = env(info.RPCEnv, info.DefaultRPC)
 	}
 
 	needed := map[domain.Chain]bool{}

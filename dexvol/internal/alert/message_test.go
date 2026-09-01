@@ -81,3 +81,30 @@ func TestSanitizeSymbol(t *testing.T) {
 		t.Fatalf("got %q", line)
 	}
 }
+
+func TestRenderFlagsAMostlyHistoricalBaseline(t *testing.T) {
+	// Right after a start, or right after a token is added, the baseline is
+	// the aggregator's history rather than this pipeline's own measurements.
+	// That is exactly when the number deserves a caveat.
+	res := detect.Result{
+		Token:     domain.Token{Symbol: "ABC", Chain: domain.ChainBase},
+		Volume:    150,
+		Primary:   detect.Change{Window: 10, Pct: 50, Median: 100, Samples: 10, Backfilled: 9},
+		Anomalous: true,
+	}
+	if !strings.Contains(Render(res).Text, "baseline mostly from history") {
+		t.Fatalf("expected the caveat:\n%s", Render(res).Text)
+	}
+}
+
+func TestRenderStaysQuietWhenBaselineIsMostlyLive(t *testing.T) {
+	res := detect.Result{
+		Token:     domain.Token{Symbol: "ABC", Chain: domain.ChainBase},
+		Volume:    150,
+		Primary:   detect.Change{Window: 10, Pct: 50, Median: 100, Samples: 10, Backfilled: 2},
+		Anomalous: true,
+	}
+	if strings.Contains(Render(res).Text, "from history") {
+		t.Fatalf("a mostly-live baseline needs no caveat:\n%s", Render(res).Text)
+	}
+}

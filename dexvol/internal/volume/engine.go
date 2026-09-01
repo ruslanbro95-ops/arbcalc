@@ -141,8 +141,13 @@ func lower(s string) string {
 // data alone would leave the service unable to judge a full day of minutes.
 // Restored buckets arrive already sealed and keep their recorded quality, so a
 // past outage stays MISSING instead of returning as a real zero.
-func (e *Engine) RestoreMinute(tokenKey string, b Bucket) error {
+func (e *Engine) RestoreMinute(tokenKey string, b Bucket) (inserted bool, err error) {
 	return e.seriesFor(tokenKey).restore(b)
+}
+
+// SealedCount reports how many minutes in the window are already sealed.
+func (e *Engine) SealedCount(tokenKey string, endExclusive time.Time, window int) int {
+	return e.seriesFor(tokenKey).SealedCount(endExclusive, window)
 }
 
 // Sum totals a token's volume over [from, to). See Series.Sum.

@@ -18,16 +18,23 @@ const (
 	ChainSolana    Chain = "solana"
 	ChainBase      Chain = "base"
 	ChainRobinhood Chain = "robinhood"
+	ChainArbitrum  Chain = "arbitrum"
+	ChainAvalanche Chain = "avalanche"
+	ChainPolygon   Chain = "polygon"
+	ChainOptimism  Chain = "optimism"
 )
 
 // IsEVM reports whether the chain speaks the JSON-RPC eth_* dialect, which
 // decides who ingests it: the shared EVM adapter or a chain-specific one.
 func (c Chain) IsEVM() bool {
-	switch c {
-	case ChainEthereum, ChainBNB, ChainBase, ChainRobinhood:
-		return true
-	}
-	return false
+	info, ok := Info(c)
+	return ok && info.EVM
+}
+
+// Supported reports whether the chain is in the registry at all.
+func (c Chain) Supported() bool {
+	_, ok := Info(c)
+	return ok
 }
 
 // Side is the direction of a swap from the tracked token's point of view.

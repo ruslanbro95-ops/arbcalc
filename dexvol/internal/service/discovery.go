@@ -19,6 +19,10 @@ type Discoverer interface {
 type DiscoveryResult struct {
 	// ByChain is the merged pool set, ready to hand to each trade source.
 	ByChain map[domain.Chain][]domain.Pool
+	// ByToken is the same pools grouped per watch-list entry. Backfill needs
+	// this split: history is fetched per pool, and only the pools belonging to
+	// the token being filled may contribute to its minutes.
+	ByToken map[string][]domain.Pool
 	// QuoteAssets are the counterparties that need a price so a swap can be
 	// valued from the other side when the tracked token has no quote.
 	QuoteAssets []domain.Token
@@ -56,9 +60,13 @@ func NewDiscovery(log *slog.Logger, providers ...Discoverer) *Discovery {
 func (d *Discovery) Run(ctx context.Context, tokens []domain.Token) DiscoveryResult {
 	res := DiscoveryResult{
 		ByChain:     map[domain.Chain][]domain.Pool{},
+		ByToken:     map[string][]domain.Pool{},
 		Symbols:     map[string]string{},
 		ExclusiveTo: map[string][]string{},
 	}
+	// perToken keeps pool keys per token while merging, so the same pool seen
+	// through both providers lands once.
+	perToken := map[string]map[string]bool{}
 
 	merged := map[string]domain.Pool{}
 	sawIt := map[string]map[string]bool{} // pool key -> providers that found it
@@ -88,6 +96,10 @@ func (d *Discovery) Run(ctx context.Context, tokens []domain.Token) DiscoveryRes
 				} else {
 					merged[key] = enrich(existing, pool)
 				}
+				if perToken[tok.Key()] == nil {
+					perToken[tok.Key()] = map[string]bool{}
+				}
+				perToken[tok.Key()][key] = true
 
 				// Remember the counterparty so it can be priced.
 				if pool.QuoteAddr != "" && !strings.EqualFold(pool.QuoteAddr, tok.Address) {
@@ -104,6 +116,13 @@ func (d *Discovery) Run(ctx context.Context, tokens []domain.Token) DiscoveryRes
 				}
 			}
 		}
+	}
+
+	for tokenKey, keys := range perToken {
+		for key := range keys {
+			res.ByToken[tokenKey] = append(res.ByToken[tokenKey], merged[key])
+		}
+		sortByVolume(res.ByToken[tokenKey])
 	}
 
 	for key, pool := range merged {
@@ -137,6 +156,20 @@ func (d *Discovery) Run(ctx context.Context, tokens []domain.Token) DiscoveryRes
 		sort.Strings(res.ExclusiveTo[name])
 	}
 	return res
+}
+
+// sortByVolume orders pools by reported 24h volume, deepest first.
+//
+// Volume rather than liquidity, because that is what backfill truncates on: the
+// spec is explicit that "percent of pools covered" and "percent of volume
+// covered" are different numbers, and only the second one matters.
+func sortByVolume(pools []domain.Pool) {
+	sort.Slice(pools, func(i, j int) bool {
+		if pools[i].Volume24hUSD != pools[j].Volume24hUSD {
+			return pools[i].Volume24hUSD > pools[j].Volume24hUSD
+		}
+		return pools[i].Address < pools[j].Address
+	})
 }
 
 // enrich fills gaps in a pool record from a second provider's view of it.

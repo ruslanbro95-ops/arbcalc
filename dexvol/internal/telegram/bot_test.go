@@ -58,7 +58,10 @@ func TestNonOwnerIsIgnoredEntirely(t *testing.T) {
 func TestAddValidatesChainAndAddress(t *testing.T) {
 	b, ctrl, store := newTestBot(t)
 
-	if _, err := b.dispatch("/add", []string{"polygon", "0x1111111111111111111111111111111111111111"}); err == nil {
+	// Sui appears in the spec as a future network but has no adapter, so it
+	// must be refused rather than accepted into a watch list that will never
+	// produce data for it.
+	if _, err := b.dispatch("/add", []string{"sui", "0x1111111111111111111111111111111111111111"}); err == nil {
 		t.Fatal("an unsupported chain must be rejected")
 	}
 	if _, err := b.dispatch("/add", []string{"base", "0xdeadbeef"}); err == nil {
@@ -77,6 +80,37 @@ func TestAddValidatesChainAndAddress(t *testing.T) {
 	}
 	if ctrl.changed != 1 {
 		t.Fatalf("pool discovery should be nudged on add, changed = %d", ctrl.changed)
+	}
+}
+
+func TestExpansionChainsCanBeAdded(t *testing.T) {
+	b, _, store := newTestBot(t)
+	for i, chain := range []string{"arbitrum", "avax", "polygon", "op"} {
+		addr := "0x" + string(rune('1'+i)) + "111111111111111111111111111111111111111"
+		if _, err := b.dispatch("/add", []string{chain, addr[:42], "T" + chain}); err != nil {
+			t.Errorf("%s: %v", chain, err)
+		}
+	}
+	if got := len(store.Get().Tokens); got != 4 {
+		t.Fatalf("stored %d tokens, want 4", got)
+	}
+}
+
+func TestChainsCommandListsRegistry(t *testing.T) {
+	b, _, _ := newTestBot(t)
+	out, err := b.dispatch("/chains", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ethereum", "solana", "arbitrum", "polygon"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/chains output missing %q:\n%s", want, out)
+		}
+	}
+	// Robinhood has no GeckoTerminal id, so the owner should be told what that
+	// costs before adding a token there.
+	if !strings.Contains(out, "no history backfill") {
+		t.Errorf("/chains should flag the single-provider network:\n%s", out)
 	}
 }
 

@@ -7,30 +7,9 @@ import (
 	"github.com/ruslanbro95-ops/arbcalc/dexvol/internal/domain"
 )
 
-// gmgnSlug maps a chain to GMGN's path segment. GMGN covers Solana, Ethereum,
-// BSC and Base; a chain absent from this map simply gets no GMGN button, which
+// Button targets come from the shared chain registry, so a network added there
+// gets its links automatically and one with no listing gets no button — which
 // is what the spec asks for when a link does not exist.
-var gmgnSlug = map[domain.Chain]string{
-	domain.ChainSolana:   "sol",
-	domain.ChainEthereum: "eth",
-	domain.ChainBNB:      "bsc",
-	domain.ChainBase:     "base",
-	// Robinhood Chain is intentionally absent: GMGN does not list it.
-}
-
-// okxSlug maps a chain to the path segment used by the OKX web3 token page.
-//
-// Unlike the GMGN pattern, this one could not be confirmed against a live page
-// while the project was built (see docs/RESEARCH.md §0 — egress was blocked),
-// so it is overridable. Set OKX_URL_TEMPLATE to a string containing {chain} and
-// {address} if OKX changes its layout, or set it to an empty value to turn the
-// OKX button off entirely.
-var okxSlug = map[domain.Chain]string{
-	domain.ChainEthereum: "ethereum",
-	domain.ChainBNB:      "bsc",
-	domain.ChainBase:     "base",
-	domain.ChainSolana:   "solana",
-}
 
 const defaultOKXTemplate = "https://web3.okx.com/token/{chain}/{address}"
 
@@ -44,15 +23,21 @@ type Link struct {
 // for that chain, and the caller must then omit the button rather than render
 // a dead one.
 func GMGNLink(t domain.Token) (Link, bool) {
-	slug, ok := gmgnSlug[t.Chain]
-	if !ok || t.Address == "" {
+	info, ok := domain.Info(t.Chain)
+	if !ok || info.GMGNSlug == "" || t.Address == "" {
 		return Link{}, false
 	}
-	return Link{Text: "GMGN", URL: "https://gmgn.ai/" + slug + "/token/" + t.Address}, true
+	return Link{Text: "GMGN", URL: "https://gmgn.ai/" + info.GMGNSlug + "/token/" + t.Address}, true
 }
 
 // OKXLink builds the OKX token page URL, honouring the OKX_URL_TEMPLATE
 // override.
+//
+// Unlike the GMGN pattern, this one could not be confirmed against a live page
+// while the project was built (see docs/RESEARCH.md §0 — egress was blocked),
+// so it is overridable. Set OKX_URL_TEMPLATE to a string containing {chain} and
+// {address} if OKX changes its layout, or set it to an empty value to turn the
+// OKX button off entirely.
 func OKXLink(t domain.Token) (Link, bool) {
 	tmpl, set := os.LookupEnv("OKX_URL_TEMPLATE")
 	if set && strings.TrimSpace(tmpl) == "" {
@@ -62,11 +47,11 @@ func OKXLink(t domain.Token) (Link, bool) {
 		tmpl = defaultOKXTemplate
 	}
 
-	slug, ok := okxSlug[t.Chain]
-	if !ok || t.Address == "" {
+	info, ok := domain.Info(t.Chain)
+	if !ok || info.OKXSlug == "" || t.Address == "" {
 		return Link{}, false
 	}
-	url := strings.ReplaceAll(tmpl, "{chain}", slug)
+	url := strings.ReplaceAll(tmpl, "{chain}", info.OKXSlug)
 	url = strings.ReplaceAll(url, "{address}", t.Address)
 	return Link{Text: "OKX", URL: url}, true
 }

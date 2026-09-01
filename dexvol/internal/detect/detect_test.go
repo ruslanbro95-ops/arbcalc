@@ -101,3 +101,19 @@ func TestDisabledWindowIsIgnored(t *testing.T) {
 		t.Fatal("the only exceeded window was disabled")
 	}
 }
+
+func TestBackfilledCountReachesTheResult(t *testing.T) {
+	// The alert renderer decides whether to caveat a baseline from this field,
+	// so it has to survive the detector.
+	d := Detector{ThresholdPct: 20, Windows: allWindows()}
+	snap := snapshot(150, volume.QualityOK, map[int]float64{10: 100})
+	bl := snap.Baselines[10]
+	bl.Backfilled = 90
+	bl.Samples = 100
+	snap.Baselines[10] = bl
+
+	res := d.Evaluate(domain.Token{}, snap)
+	if res.Primary.Backfilled != 90 {
+		t.Fatalf("backfilled = %d, want 90", res.Primary.Backfilled)
+	}
+}

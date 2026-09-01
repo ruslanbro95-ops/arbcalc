@@ -53,8 +53,33 @@ func TestDiscoverPools(t *testing.T) {
 
 func TestUnsupportedChainIsAnError(t *testing.T) {
 	c := stub(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`[]`)) })
-	if _, err := c.DiscoverPools(t.Context(), domain.Token{Chain: "polygon", Address: "0x1"}); err == nil {
+	if _, err := c.DiscoverPools(t.Context(), domain.Token{Chain: "sui", Address: "0x1"}); err == nil {
 		t.Fatal("an unmapped chain must fail loudly rather than return no pools")
+	}
+}
+
+func TestExpansionChainsAreMapped(t *testing.T) {
+	// The networks the spec lists as future work are EVM, so they need no new
+	// adapter — only a registry entry. This checks the entry actually reaches
+	// the request path.
+	for chain, want := range map[domain.Chain]string{
+		domain.ChainArbitrum:  "arbitrum",
+		domain.ChainAvalanche: "avalanche",
+		domain.ChainPolygon:   "polygon",
+		domain.ChainOptimism:  "optimism",
+	} {
+		var gotPath string
+		c := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.Write([]byte(`[]`))
+		})
+		if _, err := c.DiscoverPools(t.Context(), domain.Token{Chain: chain, Address: "0xT"}); err != nil {
+			t.Errorf("%s: %v", chain, err)
+			continue
+		}
+		if !strings.Contains(gotPath, "/"+want+"/") {
+			t.Errorf("%s: path %q does not carry the DEX Screener id %q", chain, gotPath, want)
+		}
 	}
 }
 

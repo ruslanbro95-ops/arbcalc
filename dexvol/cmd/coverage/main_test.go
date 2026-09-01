@@ -30,8 +30,26 @@ func TestParseTokensRejectsGarbage(t *testing.T) {
 	if _, err := parseTokens("base"); err == nil {
 		t.Fatal("an entry without an address must be rejected")
 	}
-	if _, err := parseTokens("polygon:0xAA"); err == nil {
+	// Sui is named in the spec as a future network but has no adapter yet, so
+	// it must be refused rather than silently accepted and never ingested.
+	if _, err := parseTokens("sui:0xAA"); err == nil {
 		t.Fatal("an unsupported chain must be rejected")
+	}
+}
+
+func TestExpansionChainsParse(t *testing.T) {
+	got, err := parseTokens("arbitrum:0xAA,avalanche:0xBB,polygon:0xCC,optimism:0xDD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []domain.Chain{
+		domain.ChainArbitrum, domain.ChainAvalanche,
+		domain.ChainPolygon, domain.ChainOptimism,
+	}
+	for i, w := range want {
+		if got[i].Chain != w {
+			t.Errorf("token %d: chain = %s, want %s", i, got[i].Chain, w)
+		}
 	}
 }
 

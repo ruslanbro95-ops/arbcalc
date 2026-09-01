@@ -14,12 +14,17 @@ import (
 
 // Change is how one minute compares against one baseline window.
 type Change struct {
-	Window   int
-	Median   float64
-	Pct      float64
-	Samples  int
-	Usable   bool
-	Exceeded bool
+	Window  int
+	Median  float64
+	Pct     float64
+	Samples int
+	// Backfilled is how many samples came from historical candles rather than
+	// from live observation. A baseline built mostly from history is measured
+	// with a slightly different ruler than the minute being judged, which is
+	// worth saying out loud before someone trades on the alert.
+	Backfilled int
+	Usable     bool
+	Exceeded   bool
 }
 
 // Result is the verdict for one token at one minute.
@@ -65,7 +70,10 @@ func (d Detector) Evaluate(tok domain.Token, snap volume.Snapshot) Result {
 			continue
 		}
 		bl := snap.Baselines[w]
-		ch := Change{Window: w, Median: bl.Median, Samples: bl.Samples, Usable: bl.Usable}
+		ch := Change{
+			Window: w, Median: bl.Median,
+			Samples: bl.Samples, Backfilled: bl.Backfilled, Usable: bl.Usable,
+		}
 		if bl.Usable {
 			if pct, ok := volume.PercentChange(snap.Current.Total, bl.Median); ok {
 				ch.Pct = pct
