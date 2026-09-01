@@ -1,3 +1,3 @@
 module github.com/ruslanbro95-ops/arbcalc/dexvol
 
-go 1.24.7
+go 1.24
