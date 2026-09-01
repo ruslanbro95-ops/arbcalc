@@ -64,6 +64,9 @@ type Pool struct {
 	Address  string `json:"address"`
 	DEX      string `json:"dex"`
 	BaseAddr string `json:"base_addr"`
+	// BaseSymbol lets discovery fill in a symbol the owner did not type when
+	// adding the token.
+	BaseSymbol string `json:"base_symbol"`
 	// QuoteAddr and QuoteSymbol let us price a swap when the pool does not
 	// trade against a stablecoin directly.
 	QuoteAddr    string    `json:"quote_addr"`

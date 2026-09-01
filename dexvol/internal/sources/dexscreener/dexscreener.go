@@ -112,6 +112,7 @@ func (c *Client) DiscoverPools(ctx context.Context, tok domain.Token) ([]domain.
 			Address:      p.PairAddress,
 			DEX:          p.DexID,
 			BaseAddr:     p.BaseToken.Address,
+			BaseSymbol:   p.BaseToken.Symbol,
 			QuoteAddr:    p.QuoteToken.Address,
 			QuoteSymbol:  p.QuoteToken.Symbol,
 			LiquidityUSD: p.Liquidity.USD,
