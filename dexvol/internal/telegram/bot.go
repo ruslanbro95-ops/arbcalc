@@ -29,28 +29,41 @@ type Controller interface {
 	TokensChanged()
 }
 
-// Bot is the owner's control panel and the alert channel.
+// Bot is the control panel and the alert channel.
 type Bot struct {
-	client  *Client
+	client *Client
+	// ownerID is the only account whose commands and settings buttons are
+	// obeyed, wherever the bot is used.
 	ownerID int64
-	store   *config.Store
-	alerts  *alert.Manager
-	ctrl    Controller
-	log     *slog.Logger
+	// alertChatID is where alerts are posted, which is not the same question.
+	// Pointing it at a group gives a team the alerts while leaving every
+	// control owner-gated; defaulting it to the owner keeps the private setup
+	// working with no configuration at all.
+	alertChatID int64
+	store       *config.Store
+	alerts      *alert.Manager
+	ctrl        Controller
+	log         *slog.Logger
 }
 
-func NewBot(c *Client, ownerID int64, store *config.Store, alerts *alert.Manager, ctrl Controller, log *slog.Logger) *Bot {
-	return &Bot{client: c, ownerID: ownerID, store: store, alerts: alerts, ctrl: ctrl, log: log}
-}
-
-// Notify delivers an alert to the owner. Alerts go to the owner's private chat
-// and nowhere else — the same id that gates the commands.
-func (b *Bot) Notify(ctx context.Context, m alert.Message) error {
-	buttons := make([]InlineButton, 0, len(m.Links))
-	for _, l := range m.Links {
-		buttons = append(buttons, InlineButton{Text: l.Text, URL: l.URL})
+func NewBot(c *Client, ownerID, alertChatID int64, store *config.Store, alerts *alert.Manager, ctrl Controller, log *slog.Logger) *Bot {
+	if alertChatID == 0 {
+		alertChatID = ownerID
 	}
-	return b.client.Send(ctx, b.ownerID, m.Text, buttons)
+	return &Bot{
+		client: c, ownerID: ownerID, alertChatID: alertChatID,
+		store: store, alerts: alerts, ctrl: ctrl, log: log,
+	}
+}
+
+// Notify delivers an alert to the alert chat, with its links and a mute
+// control that anyone reading can press.
+func (b *Bot) Notify(ctx context.Context, m alert.Message) error {
+	links := make([]InlineButton, 0, len(m.Links))
+	for _, l := range m.Links {
+		links = append(links, InlineButton{Text: l.Text, URL: l.URL})
+	}
+	return b.client.SendWith(ctx, b.alertChatID, m.Text, alertKeyboard(links, m.TokenKey))
 }
 
 // Run long-polls for commands until ctx is cancelled.
@@ -62,8 +75,13 @@ func (b *Bot) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("telegram auth failed: %w", err)
 	}
-	b.log.Info("telegram bot ready", "bot", me.Username, "owner_id", b.ownerID)
+	b.log.Info("telegram bot ready", "bot", me.Username, "owner_id", b.ownerID, "alert_chat", b.alertChatID)
 
+	if err := b.client.SetCommands(ctx, commandMenu()); err != nil {
+		// A missing command menu is cosmetic; refusing to start over it would
+		// not be.
+		b.log.Warn("could not publish the command menu", "err", err)
+	}
 	offset := 0
 	for {
 		if ctx.Err() != nil {
@@ -92,15 +110,22 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 }
 
-// handle enforces the ownership check before anything else.
+// handle routes an update to the right access check.
 //
-// Unauthorized updates are dropped without a reply: this bot holds the watch
-// list and the alerting configuration, and answering a stranger would confirm
-// the bot exists and is live.
+// Commands arrive as messages and are owner-only. Button presses arrive as
+// callback queries and have their own rule, in handleCallback: the mute is
+// open to the chat, everything else is not.
 func (b *Bot) handle(ctx context.Context, u Update) {
+	if u.CallbackQuery != nil {
+		b.handleCallback(ctx, u.CallbackQuery)
+		return
+	}
 	if u.Message == nil || u.Message.From == nil {
 		return
 	}
+	// Unauthorized messages are dropped without a reply: this bot holds the
+	// watch list and the alerting configuration, and answering a stranger
+	// would confirm the bot exists and is live.
 	if u.Message.From.ID != b.ownerID {
 		b.log.Warn("rejected message from a non-owner",
 			"from_id", u.Message.From.ID, "username", u.Message.From.Username)
@@ -108,6 +133,30 @@ func (b *Bot) handle(ctx context.Context, u Update) {
 	}
 
 	cmd, args := splitCommand(u.Message.Text)
+
+	// The panel is a screen, not a paragraph, so it is sent with its keyboard
+	// rather than through the text-only path below.
+	// /chatid answers with the id of the chat it was sent in, which is the
+	// one piece of setup Telegram makes needlessly hard: a group id is
+	// negative, thirteen digits, and appears in no interface. Sending this in
+	// the group is the whole configuration step for TELEGRAM_ALERT_CHAT_ID.
+	if cmd == "/chatid" {
+		text := fmt.Sprintf("chat id: %d\n\nTELEGRAM_ALERT_CHAT_ID=%d",
+			u.Message.Chat.ID, u.Message.Chat.ID)
+		if err := b.client.Send(ctx, u.Message.Chat.ID, text, nil); err != nil {
+			b.log.Error("could not answer /chatid", "err", err)
+		}
+		return
+	}
+
+	if cmd == "/menu" || cmd == "/start" {
+		text, rows := b.mainMenu()
+		if err := b.client.SendWith(ctx, u.Message.Chat.ID, text, rows); err != nil {
+			b.log.Error("could not send the panel", "err", err)
+		}
+		return
+	}
+
 	reply, err := b.dispatch(cmd, args)
 	if err != nil {
 		reply = "⚠ " + err.Error()
@@ -119,10 +168,9 @@ func (b *Bot) handle(ctx context.Context, u Update) {
 		b.log.Error("reply failed", "err", err)
 	}
 }
-
 func (b *Bot) dispatch(cmd string, args []string) (string, error) {
 	switch cmd {
-	case "/start", "/help":
+	case "/start", "/help", "/menu":
 		return helpText, nil
 	case "/add":
 		return b.cmdAdd(args)
@@ -159,23 +207,30 @@ func (b *Bot) dispatch(cmd string, args []string) (string, error) {
 
 const helpText = `DEX Volume Anomaly Monitor
 
-Tokens
+/menu — панель с кнопками, всё основное там
+
+Токены
 /add <chain> <address> [SYMBOL]
 /remove <symbol|address>
 /list
+/vol <symbol>             объём прямо сейчас
 
-Alerting
-/threshold [percent]      trigger level, e.g. /threshold 30
-/cooldown [minutes]       repeat suppression
-/escalation [factor]      how much stronger an anomaly must be to break cooldown
+Алерты
+/threshold [percent]      порог, например /threshold 30
+/cooldown [minutes]       подавление повторов
+/escalation [factor]      во сколько раз аномалия должна усилиться
 /windows [10|30|60|24h on|off]
+/on  /off                 алерты вкл/выкл, сбор данных продолжается
 
-Service
-/on  /off                 monitoring switch
-/settings                 current configuration
-/status                   ingestion and data quality
-/vol <symbol>             volume right now
-/chains                   supported networks`
+Сервис
+/settings                 текущая конфигурация
+/status                   ingestion и качество данных
+/chains                   поддерживаемые сети
+/chatid                   id текущего чата, для настройки группы
+
+Под каждым алертом есть кнопка «Тихо 30 мин» — её может нажать любой,
+кто читает чат, и она глушит только этот токен. Настройки менять может
+только владелец.`
 
 var (
 	evmAddr    = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
@@ -294,13 +349,15 @@ func (b *Bot) cmdChains() (string, error) {
 			providers++
 		}
 		note := ""
-		if info.GeckoTerminalID == "" {
+		switch {
+		case info.GeckoTerminalID == "":
 			// Backfill and the second discovery opinion both ride on
 			// GeckoTerminal, so its absence is worth stating up front.
 			note = " · 1 provider, no history backfill"
+		default:
+			note = fmt.Sprintf(" · %d providers", providers)
 		}
 		fmt.Fprintf(&sb, "\n%s%s", info.Chain, note)
-		_ = providers
 	}
 	return sb.String(), nil
 }

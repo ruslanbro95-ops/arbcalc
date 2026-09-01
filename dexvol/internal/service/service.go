@@ -323,6 +323,19 @@ func (s *Service) judge(ctx context.Context, rt config.Runtime, tok domain.Token
 			"token", tok.Key(), "reason", decision.Reason, "pct", res.Primary.Pct)
 		return
 	}
+
+	// A mute suppresses delivery only, and it is checked after the manager has
+	// already recorded the episode: the cooldown and the escalation ladder
+	// must keep advancing while muted, or the first alert after the mute
+	// expires would be judged against a stale anchor.
+	//
+	// Wall clock, not the minute being judged. A mute is a person saying "not
+	// for the next half hour", and it is delivery they are talking about; a
+	// backlog being replayed still arrives now.
+	if until, ok := rt.Muted[tok.Key()]; ok && time.Now().Before(until) {
+		s.log.Debug("alert muted", "token", tok.Key(), "until", until)
+		return
+	}
 	if s.notifier == nil {
 		return
 	}

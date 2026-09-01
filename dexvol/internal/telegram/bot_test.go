@@ -34,7 +34,7 @@ func newTestBotAt(t *testing.T) (*Bot, *fakeCtrl, *config.Store, string) {
 	store := config.NewStore(path)
 	ctrl := &fakeCtrl{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewBot(nil, 42, store, alert.NewManager(), ctrl, log), ctrl, store, path
+	return NewBot(nil, 42, 0, store, alert.NewManager(), ctrl, log), ctrl, store, path
 }
 
 func TestNonOwnerIsIgnoredEntirely(t *testing.T) {

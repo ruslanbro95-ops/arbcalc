@@ -22,6 +22,13 @@ type Static struct {
 	// OwnerID is the only Telegram user allowed to talk to the bot. Every
 	// other chat is refused, because the bot is also the control panel.
 	OwnerID int64
+	// AlertChatID is where alerts are posted. Zero means the owner's own chat.
+	//
+	// Pointing it at a group or channel is how a team sees the alerts without
+	// anyone but the owner being able to change a setting: commands arrive as
+	// messages and stay owner-gated, while this only decides where the
+	// notifications land.
+	AlertChatID int64
 	// StatePath is where runtime settings and the token list are persisted.
 	StatePath string
 	// DBPath is the SQLite file holding minute volumes and raw trades.
@@ -74,6 +81,13 @@ type Runtime struct {
 	EscalationFactor float64 `json:"escalation_factor"`
 	// Windows enables or disables each baseline.
 	Windows map[int]bool `json:"windows"`
+	// Muted suppresses one token's alerts until the given time, keyed by
+	// domain.Token.Key().
+	//
+	// Only delivery stops. Collection keeps running and the alert manager
+	// keeps its episode bookkeeping, so a mute never leaves a hole in the
+	// medians and never strands the escalation ladder at a stale rung.
+	Muted map[string]time.Time `json:"muted,omitempty"`
 	// Monitoring is the global on/off switch.
 	Monitoring bool `json:"monitoring"`
 	// Tokens is the watch list.
@@ -133,6 +147,21 @@ func LoadStatic() (Static, error) {
 		return s, fmt.Errorf("TELEGRAM_OWNER_ID %q is not a number: %w", raw, err)
 	}
 	s.OwnerID = id
+
+	// The alert chat is optional and defaults to the owner. A malformed value
+	// is refused rather than silently ignored: falling back to the owner's
+	// private chat would look like the bot works while the group it was meant
+	// for hears nothing.
+	if raw := strings.TrimSpace(os.Getenv("TELEGRAM_ALERT_CHAT_ID")); raw != "" {
+		chat, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return s, fmt.Errorf("TELEGRAM_ALERT_CHAT_ID %q is not a number: %w", raw, err)
+		}
+		s.AlertChatID = chat
+	}
+	if s.AlertChatID == 0 {
+		s.AlertChatID = s.OwnerID
+	}
 
 	// Endpoints come from the chain registry, so adding a network there also
 	// gives it an RPC_* override with a working public default. Public

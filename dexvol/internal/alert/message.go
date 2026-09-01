@@ -11,6 +11,11 @@ import (
 type Message struct {
 	Text  string
 	Links []Link
+	// TokenKey identifies which token the alert is about, so the delivery
+	// layer can attach controls that act on it — the mute button, today.
+	// Carrying the key rather than the symbol matters: the symbol is a label
+	// and two chains can share one.
+	TokenKey string
 }
 
 // Render builds the compact alert body.
@@ -35,6 +40,7 @@ type Message struct {
 // naming the baselines that crossed for the first time, so a repeat always
 // says what changed rather than looking like the bot spamming.
 func Render(res detect.Result, d Decision) Message {
+	key := res.Token.Key()
 	var b strings.Builder
 
 	// The chain is part of the identity: the same symbol can be listed on
@@ -86,7 +92,7 @@ func Render(res detect.Result, d Decision) Message {
 		fmt.Fprintf(&b, "\n⚠ baseline mostly from history")
 	}
 
-	return Message{Text: b.String(), Links: Links(res.Token)}
+	return Message{Text: b.String(), Links: Links(res.Token), TokenKey: key}
 }
 
 func windowLabels(windows []int) string {

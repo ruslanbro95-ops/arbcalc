@@ -468,3 +468,58 @@ func TestBacklogDoesNotCollapseSeparateSpikes(t *testing.T) {
 		t.Fatalf("two spikes ten minutes apart should produce two alerts, got %d", notifier.count())
 	}
 }
+
+func TestMutedTokenIsNotDeliveredButKeepsItsBookkeeping(t *testing.T) {
+	// The mute button is pressed by whoever is watching the alert chat, and it
+	// stops delivery only. Collection, sealing and the alert manager's episode
+	// state all keep running: a mute that left a hole in the medians would
+	// make the first minute after it expire look like a spike, which is the
+	// exact failure this project spends most of its care avoiding.
+	svc, notifier, settings := newService(t)
+	b := base()
+
+	if err := settings.Update(func(rt *config.Runtime) {
+		rt.Muted = map[string]time.Time{testToken.Key(): time.Now().Add(30 * time.Minute)}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= 30; i++ {
+		advance(svc, b.Add(time.Duration(i)*time.Minute), 100)
+	}
+	advance(svc, b.Add(31*time.Minute), 500)
+
+	if notifier.count() != 0 {
+		t.Fatalf("got %d alerts, want silence while muted", notifier.count())
+	}
+
+	// The spike minute must still be in the series at its real value.
+	snap, ok := svc.Snapshot(testToken)
+	if !ok {
+		t.Fatal("the muted token lost its snapshot")
+	}
+	if snap.Current.Total != 500 {
+		t.Fatalf("muted minute recorded as %v, want 500 — a mute must not touch the data",
+			snap.Current.Total)
+	}
+}
+
+func TestMuteExpiryRestoresDelivery(t *testing.T) {
+	svc, notifier, settings := newService(t)
+	b := base()
+
+	if err := settings.Update(func(rt *config.Runtime) {
+		rt.Muted = map[string]time.Time{testToken.Key(): time.Now().Add(-time.Minute)}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= 30; i++ {
+		advance(svc, b.Add(time.Duration(i)*time.Minute), 100)
+	}
+	advance(svc, b.Add(31*time.Minute), 500)
+
+	if notifier.count() != 1 {
+		t.Fatalf("got %d alerts, want 1 once the mute has expired", notifier.count())
+	}
+}

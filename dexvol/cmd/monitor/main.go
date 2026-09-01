@@ -79,7 +79,7 @@ func run() error {
 	svc.SetBackfiller(service.NewBackfiller(gt, engine, db, service.DefaultBackfillOptions(), log))
 
 	client := telegram.NewClient(static.TelegramToken)
-	bot := telegram.NewBot(client, static.OwnerID, settings, alerts, svc, log)
+	bot := telegram.NewBot(client, static.OwnerID, static.AlertChatID, settings, alerts, svc, log)
 	svc.SetNotifier(bot)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
