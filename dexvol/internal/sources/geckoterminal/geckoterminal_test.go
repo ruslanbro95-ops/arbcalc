@@ -185,3 +185,62 @@ func TestOHLCVUnsupportedChainIsAnError(t *testing.T) {
 		t.Fatal("a chain with no network id must fail loudly, not return an empty history")
 	}
 }
+
+func TestNetworksTreatsAPastTheEndErrorAsTheEnd(t *testing.T) {
+	// The live endpoint answers a request past the last page with 400
+	// ("expected :page in 1..3") rather than an empty list. Reporting that as
+	// a failure made preflight declare the provider unreachable while holding
+	// a complete network list.
+	var page int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page++
+		if page > 3 {
+			http.Error(w, `{"errors":[{"status":"400","title":"expected :page in 1..3; got 4"}]}`,
+				http.StatusBadRequest)
+			return
+		}
+		w.Write([]byte(`{"data":[{"id":"eth","attributes":{"name":"Ethereum"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	got, err := NewWithBase(srv.URL).Networks(t.Context(), 20)
+	if err != nil {
+		t.Fatalf("running past the last page must not be an error: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d networks, want the 3 pages that answered", len(got))
+	}
+}
+
+func TestNetworksReportsAFailureOnTheFirstPage(t *testing.T) {
+	// With nothing collected, an error is a real one and must surface.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gateway down", http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := NewWithBase(srv.URL).Networks(t.Context(), 20); err == nil {
+		t.Fatal("an unreachable provider must be reported")
+	}
+}
+
+func TestNetworksStopsOnAnEmptyPage(t *testing.T) {
+	var page int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page++
+		if page > 2 {
+			w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		w.Write([]byte(`{"data":[{"id":"eth","attributes":{"name":"Ethereum"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	got, err := NewWithBase(srv.URL).Networks(t.Context(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d, want 2", len(got))
+	}
+}

@@ -286,6 +286,12 @@ func checkLinks(ctx context.Context, r *report) {
 				return
 			case status >= 200 && status < 400:
 				r.ok(group, name, fmt.Sprintf("http %d", status))
+			case status == http.StatusForbidden || status == http.StatusTooManyRequests:
+				// Bot protection, not a broken link. Sites like GMGN sit
+				// behind a challenge that a plain HTTP client cannot pass,
+				// and the same URL opens perfectly in a browser.
+				r.warn(group, name, fmt.Sprintf("http %d — looks like bot protection", status),
+					"open one of these in a browser once to confirm the pattern; a 403 here is expected and does not affect the buttons")
 			case l.Text == "OKX":
 				// This pattern is the one that could not be confirmed against
 				// a live page while the project was built.

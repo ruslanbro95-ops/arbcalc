@@ -52,3 +52,16 @@ func TestLinksOrderAndOmission(t *testing.T) {
 		t.Fatalf("expected no buttons, got %+v", got)
 	}
 }
+
+func TestOKXArbitrumUsesItsOwnSlug(t *testing.T) {
+	// OKX names this chain arbitrum-one, unlike every other one here where the
+	// slug matches the common name. Preflight found it: "arbitrum" answered
+	// 404 while the other seven chains answered 200.
+	l, ok := OKXLink(domain.Token{Chain: domain.ChainArbitrum, Address: "0xAA"})
+	if !ok {
+		t.Fatal("expected a link")
+	}
+	if l.URL != "https://web3.okx.com/token/arbitrum-one/0xAA" {
+		t.Fatalf("got %q", l.URL)
+	}
+}

@@ -348,6 +348,14 @@ func (c *Client) Networks(ctx context.Context, maxPages int) ([]Network, error) 
 		}
 		endpoint := fmt.Sprintf("%s/networks?page=%d", c.baseURL, page)
 		if err := c.http.GetJSON(ctx, endpoint, &resp); err != nil {
+			// Asking past the last page is answered with 400 ("expected :page
+			// in 1..3") rather than an empty list, so a failure after we
+			// already have entries is the end of the list and not an outage.
+			// Reporting it as one made preflight declare the provider
+			// unreachable while holding a complete network list.
+			if len(out) > 0 {
+				return out, nil
+			}
 			return out, err
 		}
 		if len(resp.Data) == 0 {

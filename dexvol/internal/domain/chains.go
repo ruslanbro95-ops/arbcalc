@@ -87,7 +87,10 @@ var chainRegistry = []ChainInfo{
 	{
 		Chain: ChainArbitrum, EVM: true, ChainID: 42161,
 		DexScreenerID: "arbitrum", GeckoTerminalID: "arbitrum",
-		GMGNSlug: "", OKXSlug: "arbitrum",
+		// OKX names this one arbitrum-one, unlike every other chain here
+		// where its slug matches the common name. Confirmed by preflight:
+		// "arbitrum" answered 404 while the other seven answered 200.
+		GMGNSlug: "", OKXSlug: "arbitrum-one",
 		RPCEnv: "RPC_ARBITRUM", DefaultRPC: "https://arbitrum-one-rpc.publicnode.com",
 		Aliases: []string{"arb", "arbitrum"},
 	},
