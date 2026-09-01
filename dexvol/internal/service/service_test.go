@@ -124,21 +124,63 @@ func TestSpikeProducesOneAlert(t *testing.T) {
 	}
 }
 
-func TestSustainedAnomalyIsNotSpammed(t *testing.T) {
-	svc, notifier, _ := newService(t)
+// The spec's worked example end to end. Its four elevated minutes read as
+// +50/+70/+80/+60% against the settled baseline, which the spec calls one
+// anomaly deserving one message.
+//
+// At the shipped escalation step of 1.5 that costs two messages, because the
+// +80% minute clears the first rung at 75. That is the owner's deliberate
+// trade for catching smaller intensifications sooner, and the second half of
+// this test shows the spec's own behaviour is one /escalation command away.
+func TestSustainedAnomalyCostsTwoAtTheDefaultAndOneAtStepTwo(t *testing.T) {
+	run := func(t *testing.T, factor float64) int {
+		t.Helper()
+		svc, notifier, settings := newService(t)
+		if err := settings.Update(func(rt *config.Runtime) { rt.EscalationFactor = factor }); err != nil {
+			t.Fatal(err)
+		}
+		b := base()
+		for i := 1; i <= 30; i++ {
+			advance(svc, b.Add(time.Duration(i)*time.Minute), 100)
+		}
+		for i, usd := range []float64{150, 170, 180, 160} {
+			advance(svc, b.Add(time.Duration(31+i)*time.Minute), usd)
+		}
+		return notifier.count()
+	}
+
+	if got := run(t, 1.5); got != 2 {
+		t.Errorf("at the 1.5 default the run should cost two messages, got %d", got)
+	}
+	if got := run(t, 2.0); got != 1 {
+		t.Errorf("raising the step to 2.0 should restore the spec's single message, got %d", got)
+	}
+}
+
+func TestThresholdAndEscalationAreTunableWithoutARestart(t *testing.T) {
+	// Both defaults are owner-chosen and both must be changeable from the bot
+	// while the service runs, which is what the settings store round trip
+	// proves here.
+	svc, notifier, settings := newService(t)
 	b := base()
 
 	for i := 1; i <= 30; i++ {
 		advance(svc, b.Add(time.Duration(i)*time.Minute), 100)
 	}
-
-	// Four consecutive elevated minutes, none of them double the first.
-	for i, usd := range []float64{150, 170, 180, 160} {
-		advance(svc, b.Add(time.Duration(31+i)*time.Minute), usd)
+	// +25% sits under the 30% default and must stay silent.
+	advance(svc, b.Add(31*time.Minute), 125)
+	if notifier.count() != 0 {
+		t.Fatalf("+25%% is below the default threshold, got %d alerts", notifier.count())
 	}
 
+	// Lower the threshold mid-run; the very next minute is judged by the new
+	// value with no restart in between.
+	if err := settings.Update(func(rt *config.Runtime) { rt.ThresholdPct = 20 }); err != nil {
+		t.Fatal(err)
+	}
+	advance(svc, b.Add(32*time.Minute), 125)
 	if notifier.count() != 1 {
-		t.Fatalf("one continuing anomaly should produce one message, got %d", notifier.count())
+		t.Fatalf("after lowering the threshold the same move should alert, got %d", notifier.count())
 	}
 }
 

@@ -149,8 +149,13 @@ func TestRenderNamesTheEscalatedBaseline(t *testing.T) {
 		Primary:   detect.Change{Window: 1440, Pct: 250, Median: 142_000},
 		Anomalous: true,
 	}
-	got := Render(res, Decision{Send: true, Reason: ReasonEscalation, EscalatedWindows: []int{1440}})
-	if !strings.Contains(got.Text, "\nescalated: 24h") {
-		t.Fatalf("expected the escalation line:\n%s", got.Text)
+	got := Render(res, Decision{
+		Send: true, Reason: ReasonEscalation,
+		Escalated: []WindowGrowth{{Window: 1440, Multiple: 5}},
+	})
+	// The multiple is against the episode's opening alert, so it says how much
+	// bigger this is than what the owner was first told.
+	if !strings.Contains(got.Text, "\nescalated: 24h x5.0") {
+		t.Fatalf("expected the escalation line with its multiple:\n%s", got.Text)
 	}
 }

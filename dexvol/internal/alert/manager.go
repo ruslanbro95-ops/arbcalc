@@ -29,48 +29,71 @@ type Decision struct {
 	// time in this episode. The message quotes them, so a repeat inside the
 	// cooldown always answers "why am I seeing this again".
 	NewWindows []int
-	// EscalatedWindows names the baselines whose own reading grew past the
-	// escalation factor since they were last reported.
-	EscalatedWindows []int
+	// Escalated names the baselines that took a new step up the ladder, with
+	// how far each has grown since the episode's opening alert.
+	Escalated []WindowGrowth
+}
+
+// WindowGrowth is one baseline's growth relative to the episode anchor.
+type WindowGrowth struct {
+	Window int
+	// Multiple is the current percentage divided by the one this window showed
+	// in the alert that first reported it.
+	Multiple float64
 }
 
 // Policy is the owner-configurable part of the decision.
 type Policy struct {
 	Cooldown time.Duration
-	// EscalationFactor lets a much stronger reading interrupt an active
-	// cooldown even when no new baseline crossed: some baseline's change must
-	// be at least this many times what that same baseline last reported.
+	// EscalationFactor is the step size of the escalation ladder: a baseline
+	// must reach this multiple of where it stood at the episode's opening
+	// alert before it is worth reporting again, then this multiple again, and
+	// so on.
 	//
-	// The default is 2.0, not 1.5, and the spec is what fixes it. Its worked
-	// example runs +50/+70/+80/+60% over four consecutive minutes and calls
-	// that one continuing anomaly deserving one message. At 1.5 the +80%
-	// minute clears the bar (80/50 = 1.6) and sends a second. At 2.0 none of
-	// the three follow-ups clear it, while a genuinely different move — +200%
-	// after +50% — still gets through immediately.
+	// The anchor is the opening alert and never moves during an episode, which
+	// is what makes the multiple mean something a person can hold onto: "this
+	// is three times the move I was first told about". Re-anchoring on each
+	// message instead would make every step relative to the previous one and
+	// lose the sense of total growth.
+	//
+	// The ladder is what keeps a fixed anchor from spamming. A bare
+	// "pct >= anchor * factor" rule would fire every single minute for as long
+	// as the anomaly stayed above that one line; requiring the NEXT rung means
+	// each further message reports a genuinely larger move.
+	//
+	// Note the owner-chosen default of 1.5 deliberately parts with the spec's
+	// worked example, which runs +50/+70/+80/+60% and calls it one message: at
+	// 1.5 the +80% minute clears the first rung (50 x 1.5 = 75) and sends a
+	// second. At 2.0 it would not. Tunable at runtime with /escalation.
 	EscalationFactor float64
 }
 
 // state is one token's live alert episode.
 type state struct {
 	lastAlert time.Time
-	// reported holds, per baseline window, the percentage last announced for
-	// it. A window present here has already fired in this episode.
+	// anchor holds, per baseline window, the percentage that window showed in
+	// the alert which first reported it. It is the episode's reference point
+	// and does not move until the cooldown expires and the episode restarts.
 	//
-	// Keeping it per window does two jobs. It separates "the same anomaly,
-	// still running" from "something new happened": a minute repeating the
-	// previous reading crosses no window it has not already crossed, so it
-	// stays silent, while a baseline crossing for the first time goes out at
-	// once.
+	// A window present here has already fired, which is what separates "the
+	// same anomaly, still running" from "something new happened": a minute
+	// repeating the previous reading crosses no window it has not already
+	// crossed, so it stays silent, while a baseline crossing for the first
+	// time goes out at once.
 	//
-	// And it keeps escalation honest. Measuring growth against whichever
-	// window happened to be largest last time compares different baselines to
-	// each other, which silences the most common shape of a sustained pump:
-	// the short medians absorb the new level within minutes so their
-	// percentages fade, while the 24h median — 1,440 samples deep — barely
-	// moves, so its percentage keeps climbing. Compared against the earlier
-	// 10m reading, a 24h anomaly growing fivefold looks like a decline and is
-	// suppressed. Compared against its own last value, it is what it is.
-	reported map[int]float64
+	// Anchoring per window is also what keeps escalation honest. Measuring
+	// growth against whichever window happened to be largest last time
+	// compares different baselines to each other, which silences the most
+	// common shape of a sustained pump: the short medians absorb the new level
+	// within minutes so their percentages fade, while the 24h median — 1,440
+	// samples deep — barely moves, so its percentage keeps climbing. Compared
+	// against the earlier 10m reading, a 24h anomaly growing fivefold looks
+	// like a decline and is suppressed. Compared against its own opening
+	// value, it is what it is.
+	anchor map[int]float64
+	// step is the highest rung of the escalation ladder already announced for
+	// each window, counted in multiples of its anchor.
+	step map[int]int
 }
 
 // Manager enforces cooldown and deduplication across alerts.
@@ -100,15 +123,17 @@ func (m *Manager) Decide(key string, res detect.Result, now time.Time, p Policy)
 
 	st := m.states[key]
 	if st == nil {
-		m.states[key] = &state{lastAlert: now, reported: pctByWindow(exceeded)}
+		st = newEpisode(exceeded)
+		st.lastAlert = now
+		m.states[key] = st
 		return Decision{Send: true, Reason: ReasonFirst, NewWindows: windowsOf(exceeded)}
 	}
 
-	// The cooldown has run out: the episode restarts, and the reported set
-	// with it, so a baseline that crosses again later counts as new again.
+	// The cooldown has run out: the episode restarts, and the anchors with it,
+	// so growth is measured afresh from here.
 	if now.Sub(st.lastAlert) >= p.Cooldown {
+		*st = *newEpisode(exceeded)
 		st.lastAlert = now
-		st.reported = pctByWindow(exceeded)
 		return Decision{Send: true, Reason: ReasonCooldown, NewWindows: windowsOf(exceeded)}
 	}
 
@@ -116,47 +141,78 @@ func (m *Manager) Decide(key string, res detect.Result, now time.Time, p Policy)
 	// not a repeat, and goes out regardless of the cooldown.
 	var fresh []int
 	for _, ch := range exceeded {
-		if _, seen := st.reported[ch.Window]; !seen {
+		if _, seen := st.anchor[ch.Window]; !seen {
 			fresh = append(fresh, ch.Window)
 		}
 	}
 	if len(fresh) > 0 {
 		st.lastAlert = now
-		st.record(exceeded)
+		st.record(exceeded, p.EscalationFactor)
 		return Decision{Send: true, Reason: ReasonNewTrigger, NewWindows: fresh}
 	}
 
-	// No new baseline, but some baseline's own reading grew enough that
-	// staying silent would hide a materially different event behind the
-	// earlier, smaller one. Each window is judged against what it itself last
-	// reported, never against another window's number.
-	var escalated []int
-	if p.EscalationFactor > 1 {
-		for _, ch := range exceeded {
-			prev := st.reported[ch.Window]
-			if prev > 0 && ch.Pct >= prev*p.EscalationFactor {
-				escalated = append(escalated, ch.Window)
-			}
+	// No new baseline, but some baseline climbed to a rung of its own ladder
+	// that has not been announced yet. Each window is judged against its own
+	// opening value, never against another window's number.
+	var escalated []WindowGrowth
+	for _, ch := range exceeded {
+		a := st.anchor[ch.Window]
+		if rungsCleared(ch.Pct, a, p.EscalationFactor) > st.step[ch.Window] {
+			escalated = append(escalated, WindowGrowth{Window: ch.Window, Multiple: ch.Pct / a})
 		}
 	}
 	if len(escalated) > 0 {
 		st.lastAlert = now
-		st.record(exceeded)
-		return Decision{Send: true, Reason: ReasonEscalation, EscalatedWindows: escalated}
+		st.record(exceeded, p.EscalationFactor)
+		return Decision{Send: true, Reason: ReasonEscalation, Escalated: escalated}
 	}
 
 	return Decision{Reason: ReasonSuppressed}
 }
 
-// record refreshes the reported percentage of every exceeded window.
-//
-// All of them, not only the ones that triggered the send: the message lists
-// every crossing baseline, so the owner has now seen each of those numbers and
-// the bar for "grew again" belongs at what was shown.
-func (s *state) record(exceeded []detect.Change) {
+func newEpisode(exceeded []detect.Change) *state {
+	st := &state{anchor: make(map[int]float64, len(exceeded)), step: map[int]int{}}
 	for _, ch := range exceeded {
-		s.reported[ch.Window] = ch.Pct
+		st.anchor[ch.Window] = ch.Pct
 	}
+	return st
+}
+
+// record marks how far up its ladder each shown window has been reported.
+//
+// Every exceeded window, not only the one that triggered the send: the message
+// lists them all, so the owner has now seen each of those numbers and none of
+// them should immediately re-announce the same rung. Anchors are never touched
+// here — that is the point of anchoring on the opening alert.
+func (s *state) record(exceeded []detect.Change, factor float64) {
+	for _, ch := range exceeded {
+		a, seen := s.anchor[ch.Window]
+		if !seen {
+			// A window joining mid-episode anchors where it first crossed.
+			s.anchor[ch.Window] = ch.Pct
+			s.step[ch.Window] = 0
+			continue
+		}
+		if n := rungsCleared(ch.Pct, a, factor); n > s.step[ch.Window] {
+			s.step[ch.Window] = n
+		}
+	}
+}
+
+// maxRungs bounds the ladder so a pathological percentage cannot spin the loop.
+const maxRungs = 64
+
+// rungsCleared counts how many times pct has multiplied past the anchor by the
+// factor: anchor*f, anchor*f^2, and so on.
+func rungsCleared(pct, anchor, factor float64) int {
+	if anchor <= 0 || factor <= 1 || pct <= 0 {
+		return 0
+	}
+	n := 0
+	for level := anchor * factor; pct >= level && n < maxRungs; level *= factor {
+		n++
+	}
+	return n
 }
 
 // Reset forgets a token's alert history, used when it is removed from the
@@ -186,12 +242,4 @@ func windowsOf(changes []detect.Change) []int {
 		out = append(out, ch.Window)
 	}
 	return out
-}
-
-func pctByWindow(changes []detect.Change) map[int]float64 {
-	m := make(map[int]float64, len(changes))
-	for _, ch := range changes {
-		m[ch.Window] = ch.Pct
-	}
-	return m
 }

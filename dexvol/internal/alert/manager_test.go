@@ -37,8 +37,10 @@ func daily(pct float64) detect.Result {
 	return result(20, map[int]float64{volume.Window24h: pct})
 }
 
+// policy mirrors the shipped defaults: a five-minute cooldown and a ladder
+// step of 1.5.
 func policy() Policy {
-	return Policy{Cooldown: 5 * time.Minute, EscalationFactor: 2.0}
+	return Policy{Cooldown: 5 * time.Minute, EscalationFactor: 1.5}
 }
 
 func base() time.Time { return time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC) }
@@ -57,9 +59,10 @@ func TestRepeatOfTheSameReadingIsSilent(t *testing.T) {
 	if d := m.Decide("k", daily(50), base().Add(time.Minute), p); d.Send {
 		t.Fatalf("an identical reading must stay silent, got %s", d.Reason)
 	}
-	// Still silent four minutes in, while the cooldown holds.
-	if d := m.Decide("k", daily(52), base().Add(4*time.Minute), p); d.Send {
-		t.Fatalf("a near-identical reading must stay silent, got %s", d.Reason)
+	// Still silent four minutes in, while the cooldown holds and the reading
+	// has not reached the first rung (50 x 1.5 = 75).
+	if d := m.Decide("k", daily(70), base().Add(4*time.Minute), p); d.Send {
+		t.Fatalf("a reading below the first rung must stay silent, got %s", d.Reason)
 	}
 }
 
@@ -117,25 +120,36 @@ func TestFlappingWindowDoesNotReAlert(t *testing.T) {
 	}
 }
 
-// The spec's own worked example: four consecutive elevated minutes on the same
-// baselines are one anomaly and must produce exactly one message.
-func TestSustainedAnomalyIsOneMessage(t *testing.T) {
-	m := NewManager()
-	p := policy()
-	sent := 0
-
-	for i, pct := range []float64{50, 70, 80, 60} {
-		d := m.Decide("k", daily(pct), base().Add(time.Duration(i)*time.Minute), p)
-		if d.Send {
-			sent++
+// The spec's worked example — +50/+70/+80/+60% over four consecutive minutes —
+// is described there as one anomaly deserving one message. That holds at a
+// ladder step of 2.0 and not at the shipped default of 1.5, where the +80%
+// minute clears the first rung at 75.
+//
+// The 1.5 default is a deliberate owner choice, traded for catching smaller
+// intensifications sooner. This test pins both halves so the trade stays a
+// recorded decision rather than drifting into a silent regression.
+func TestSpecRunCostsOneMessageAtTwoAndTwoAtTheDefault(t *testing.T) {
+	run := func(factor float64) int {
+		m := NewManager()
+		p := Policy{Cooldown: 5 * time.Minute, EscalationFactor: factor}
+		sent := 0
+		for i, pct := range []float64{50, 70, 80, 60} {
+			if m.Decide("k", daily(pct), base().Add(time.Duration(i)*time.Minute), p).Send {
+				sent++
+			}
 		}
+		return sent
 	}
-	if sent != 1 {
-		t.Fatalf("sent %d messages, want 1", sent)
+
+	if got := run(2.0); got != 1 {
+		t.Errorf("at a step of 2.0 the spec run should be one message, got %d", got)
+	}
+	if got := run(1.5); got != 2 {
+		t.Errorf("at the 1.5 default the +80%% minute clears rung one, so two messages; got %d", got)
 	}
 }
 
-func TestEscalationStillBreaksCooldownWithoutANewWindow(t *testing.T) {
+func TestEscalationBreaksCooldownWithoutANewWindow(t *testing.T) {
 	// Same single baseline, but the move quadrupled. Holding that for five
 	// minutes behind a +50% notice would hide the larger event.
 	m := NewManager()
@@ -146,28 +160,56 @@ func TestEscalationStillBreaksCooldownWithoutANewWindow(t *testing.T) {
 	if !d.Send || d.Reason != ReasonEscalation {
 		t.Fatalf("expected escalation, got %+v", d)
 	}
-	// The bar now sits at 200%, so 210% is not a further escalation.
+	if len(d.Escalated) != 1 || d.Escalated[0].Multiple != 4 {
+		t.Fatalf("growth = %+v, want the 24h window at x4 of its opening 50%%", d.Escalated)
+	}
+	// 200 sits on rung 3 (50 -> 75 -> 112.5 -> 168.75). 210 is still rung 3,
+	// so it is the same news reported twice.
 	if d := m.Decide("k", daily(210), base().Add(2*time.Minute), p); d.Send {
-		t.Fatalf("escalation must re-arm at the new level, got %s", d.Reason)
+		t.Fatalf("the same rung must not re-announce, got %s", d.Reason)
 	}
 }
 
-func TestEscalationBarIsCalibratedToTheSpecExample(t *testing.T) {
-	// At a factor of 1.5 the spec's +80% minute would clear 50% x 1.5 = 75%
-	// and send a second message, contradicting the example that calls the run
-	// a single anomaly. This pins the reason the default is 2.0.
+func TestAnchorStaysAtTheOpeningAlert(t *testing.T) {
+	// The distinguishing case between anchoring on the opening alert and
+	// re-anchoring on each message.
+	//
+	// Opening at 50 puts the rungs at 75, 112.5, 168.75. An escalation at 80
+	// takes rung one. A later reading of 115 takes rung two and must send.
+	// Had the anchor moved to 80, the next bar would sit at 120 and 115 would
+	// be silently swallowed.
 	m := NewManager()
-	loose := Policy{Cooldown: 5 * time.Minute, EscalationFactor: 1.5}
+	p := policy()
 
-	m.Decide("k", daily(50), base(), loose)
-	if d := m.Decide("k", daily(80), base().Add(2*time.Minute), loose); !d.Send {
-		t.Fatal("sanity: at 1.5 the +80% minute does clear the bar")
+	m.Decide("k", daily(50), base(), p)
+	if d := m.Decide("k", daily(80), base().Add(time.Minute), p); !d.Send {
+		t.Fatal("80 clears the first rung at 75")
 	}
+	d := m.Decide("k", daily(115), base().Add(2*time.Minute), p)
+	if !d.Send || d.Reason != ReasonEscalation {
+		t.Fatalf("115 clears rung two at 112.5 measured from the opening 50, got %+v", d)
+	}
+	if got := d.Escalated[0].Multiple; got < 2.29 || got > 2.31 {
+		t.Fatalf("multiple = %v, want ~2.3 against the opening alert", got)
+	}
+}
 
-	m2 := NewManager()
-	m2.Decide("k", daily(50), base(), policy())
-	if d := m2.Decide("k", daily(80), base().Add(2*time.Minute), policy()); d.Send {
-		t.Fatalf("at the 2.0 default it must not, got %s", d.Reason)
+func TestEachFurtherMessageNeedsTheNextRung(t *testing.T) {
+	// A fixed anchor with a bare "pct >= anchor * factor" rule would fire every
+	// minute for as long as the anomaly stayed above one line. The ladder is
+	// what stops that.
+	m := NewManager()
+	p := policy()
+
+	m.Decide("k", daily(50), base(), p)
+	if d := m.Decide("k", daily(80), base().Add(time.Minute), p); !d.Send {
+		t.Fatal("rung one")
+	}
+	for i, pct := range []float64{82, 90, 100, 110} {
+		at := base().Add(time.Duration(2+i) * time.Minute)
+		if d := m.Decide("k", daily(pct), at, p); d.Send {
+			t.Fatalf("%.0f%% is still rung one and must stay silent, got %s", pct, d.Reason)
+		}
 	}
 }
 
@@ -241,54 +283,66 @@ func TestEscalationIsMeasuredPerWindow(t *testing.T) {
 	if !d.Send || d.Reason != ReasonEscalation {
 		t.Fatalf("a 24h baseline growing 50%% -> 250%% must escalate, got %+v", d)
 	}
-	if len(d.EscalatedWindows) != 1 || d.EscalatedWindows[0] != volume.Window24h {
-		t.Fatalf("escalated windows = %v, want [1440]", d.EscalatedWindows)
+	if len(d.Escalated) != 1 || d.Escalated[0].Window != volume.Window24h {
+		t.Fatalf("escalated = %+v, want just the 24h window", d.Escalated)
 	}
 }
 
 func TestAFadingWindowDoesNotEscalate(t *testing.T) {
 	// The mirror case: 10m shrank, so nothing about it is new. Without a
-	// per-window bar, 10m's fall could be masked by 24h's rise or vice versa.
+	// per-window ladder, 10m's fall could be masked by 24h's rise or vice versa.
 	m := NewManager()
 	p := policy()
 
 	m.Decide("k", pump(200, 50), base(), p)
-	d := m.Decide("k", pump(90, 60), base().Add(time.Minute), p)
+	d := m.Decide("k", pump(120, 70), base().Add(time.Minute), p)
 	if d.Send {
-		t.Fatalf("neither window doubled its own reading, got %s", d.Reason)
+		t.Fatalf("10m fell and 24h has not reached its rung at 75, got %s", d.Reason)
 	}
 }
 
-func TestEscalationBarRearmsPerWindow(t *testing.T) {
-	m := NewManager()
-	p := policy()
-
-	m.Decide("k", pump(200, 50), base(), p)
-	// 24h escalates to 250 and the message reports both windows.
-	m.Decide("k", pump(80, 250), base().Add(time.Minute), p)
-	// 24h must now clear 500, not 100, to escalate again.
-	if d := m.Decide("k", pump(80, 400), base().Add(2*time.Minute), p); d.Send {
-		t.Fatalf("24h's bar should have moved to its reported 250, got %s", d.Reason)
-	}
-	if d := m.Decide("k", pump(80, 520), base().Add(3*time.Minute), p); !d.Send {
-		t.Fatal("clearing the new bar must send")
-	}
-}
-
-func TestReportedValuesRefreshForEveryShownWindow(t *testing.T) {
+func TestEveryShownWindowAdvancesItsRung(t *testing.T) {
 	// The message lists every crossing baseline, so after a send the owner has
-	// seen all of those numbers and each bar belongs at what was shown — not
-	// only the window that triggered the send.
+	// seen all of those numbers and none of them should immediately
+	// re-announce the rung it already occupies.
 	m := NewManager()
 	p := policy()
 
 	m.Decide("k", pump(30, 30), base(), p)
-	// 10m triples: escalation. The message also shows 24h at 100.
+	// 10m reaches rung 2 (30 -> 45 -> 67.5) and escalates; the message also
+	// shows 24h at 100, which is rung 3 for it (30 -> 45 -> 67.5 -> 101.25 is
+	// rung 3 at 101.25, so 100 is rung 2).
 	if d := m.Decide("k", pump(90, 100), base().Add(time.Minute), p); !d.Send {
 		t.Fatal("10m tripling must escalate")
 	}
-	// 24h at 150 is only 1.5x its shown 100, so it must not send.
-	if d := m.Decide("k", pump(90, 150), base().Add(2*time.Minute), p); d.Send {
-		t.Fatalf("24h's bar should sit at the reported 100, got %s", d.Reason)
+	// 24h at 101 has now reached its rung 3 and is genuinely new.
+	if d := m.Decide("k", pump(90, 102), base().Add(2*time.Minute), p); !d.Send {
+		t.Fatalf("24h crossing 101.25 is a new rung, got %s", d.Reason)
+	}
+	// But repeating that same level is not.
+	if d := m.Decide("k", pump(90, 103), base().Add(3*time.Minute), p); d.Send {
+		t.Fatalf("the same rung must not re-announce, got %s", d.Reason)
+	}
+}
+
+func TestRungsCleared(t *testing.T) {
+	cases := []struct {
+		pct, anchor, factor float64
+		want                int
+	}{
+		{50, 50, 1.5, 0},    // at the anchor
+		{74, 50, 1.5, 0},    // just under rung one
+		{75, 50, 1.5, 1},    // exactly rung one
+		{112.5, 50, 1.5, 2}, // exactly rung two
+		{200, 50, 1.5, 3},
+		{100, 0, 1.5, 0},  // no anchor to measure against
+		{100, 50, 1.0, 0}, // a factor of one would be an infinite ladder
+		{0, 50, 1.5, 0},
+	}
+	for _, c := range cases {
+		if got := rungsCleared(c.pct, c.anchor, c.factor); got != c.want {
+			t.Errorf("rungsCleared(%v, %v, %v) = %d, want %d",
+				c.pct, c.anchor, c.factor, got, c.want)
+		}
 	}
 }

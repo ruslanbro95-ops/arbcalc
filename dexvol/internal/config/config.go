@@ -64,9 +64,9 @@ type Runtime struct {
 // DefaultRuntime matches the values the spec calls standard.
 func DefaultRuntime() Runtime {
 	return Runtime{
-		ThresholdPct:     20,
+		ThresholdPct:     30,
 		CooldownMinutes:  5,
-		EscalationFactor: 2.0,
+		EscalationFactor: 1.5,
 		Windows: map[int]bool{
 			10:      true,
 			30:      true,

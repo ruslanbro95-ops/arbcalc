@@ -60,8 +60,16 @@ func Render(res detect.Result, d Decision) Message {
 	switch {
 	case d.Reason == ReasonNewTrigger && len(d.NewWindows) > 0:
 		fmt.Fprintf(&b, "\nnew: %s", windowLabels(d.NewWindows))
-	case d.Reason == ReasonEscalation && len(d.EscalatedWindows) > 0:
-		fmt.Fprintf(&b, "\nescalated: %s", windowLabels(d.EscalatedWindows))
+	case d.Reason == ReasonEscalation && len(d.Escalated) > 0:
+		// The multiple is against the episode's opening alert, so it answers
+		// "how much bigger than what you were first told" rather than "bigger
+		// than the previous message", which would lose the sense of total
+		// growth over a long run.
+		parts := make([]string, 0, len(d.Escalated))
+		for _, g := range d.Escalated {
+			parts = append(parts, fmt.Sprintf("%s x%.1f", FormatWindow(g.Window), g.Multiple))
+		}
+		fmt.Fprintf(&b, "\nescalated: %s", strings.Join(parts, " "))
 	}
 
 	// Only mention data quality when it is imperfect — a clean feed should not
