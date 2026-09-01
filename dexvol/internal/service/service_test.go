@@ -84,6 +84,21 @@ func base() time.Time { return time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC) }
 // period runs from there, so any instant just past m+1min+SealDelay lands on m.
 func seal(svc *Service, minute time.Time) {
 	svc.sealDue(context.Background(), minute.Add(time.Minute).Add(svc.static.SealDelay).Add(time.Second))
+	drainAlerts(svc)
+}
+
+// drainAlerts stands in for deliverLoop, which the tests do not run. Delivery
+// is asynchronous in the real service so a slow Telegram cannot stall minute
+// sealing; here it only has to happen before the assertions.
+func drainAlerts(svc *Service) {
+	for {
+		select {
+		case out := <-svc.outbox:
+			svc.notifier.Notify(context.Background(), out.msg)
+		default:
+			return
+		}
+	}
 }
 
 // advance records one minute of volume and then closes it, the way the running
@@ -418,5 +433,38 @@ func TestLateTradesDoNotCreateFakeZeroMinutes(t *testing.T) {
 	if notifier.count() != 0 {
 		t.Fatalf("a flat series must never alert, got %d:\n%s",
 			notifier.count(), notifier.sent[0].Text)
+	}
+}
+
+func TestBacklogDoesNotCollapseSeparateSpikes(t *testing.T) {
+	// The alert cooldown is stated in market minutes, but the judge used to
+	// read the wall clock. sealDue is built to walk a backlog — a sleeping
+	// laptop, a slow restart, or simply a slow Telegram send stalling the seal
+	// loop — and every minute in that backlog is judged within the same
+	// millisecond. Measured on the wall clock the cooldown never elapses, so a
+	// whole catch-up collapses into one message however far apart the spikes
+	// really were.
+	svc, notifier, _ := newService(t)
+	b := base()
+
+	// Warm the baselines up minute by minute, the way the running service does.
+	for i := 1; i <= 30; i++ {
+		advance(svc, b.Add(time.Duration(i)*time.Minute), 100)
+	}
+	// Now the service stalls: volume keeps arriving but nothing is sealed.
+	// Two spikes ten market-minutes apart — double the five-minute cooldown.
+	for i := 31; i <= 45; i++ {
+		usd := 100.0
+		if i == 31 || i == 41 {
+			usd = 5000
+		}
+		feed(svc, b.Add(time.Duration(i)*time.Minute), usd)
+	}
+
+	// One catch-up pass seals and judges all fifteen back to back.
+	seal(svc, b.Add(45*time.Minute))
+
+	if notifier.count() != 2 {
+		t.Fatalf("two spikes ten minutes apart should produce two alerts, got %d", notifier.count())
 	}
 }

@@ -15,11 +15,21 @@ import (
 
 type stubHistory struct {
 	// perPool maps a pool address to the volume it reports in every minute.
-	perPool     map[string]float64
-	failPools   map[string]bool
+	perPool   map[string]float64
+	failPools map[string]bool
+	// depth is how many minutes before origin the provider's history for a
+	// pool begins; absent means unlimited. It stands in for a pool created
+	// recently, or a provider whose data is shallower than the window asked
+	// for. It is an absolute boundary, not a page size — paging past it must
+	// return nothing rather than inventing more history.
+	depth       map[string]int
+	origin      time.Time
 	calls       int
 	unsupported bool
 }
+
+// stubPageSize mirrors the real endpoint's maximum page.
+const stubPageSize = 1000
 
 func (s *stubHistory) Name() string { return "stub-history" }
 
@@ -34,13 +44,19 @@ func (s *stubHistory) OHLCVMinute(_ context.Context, pool domain.Pool, limit int
 	if !ok {
 		return nil, nil
 	}
-	// One page covering the whole day, newest first.
-	out := make([]sources.Candle, 0, 1440)
+	var earliest time.Time
+	if d, limited := s.depth[pool.Address]; limited {
+		earliest = s.origin.UTC().Truncate(time.Minute).Add(-time.Duration(d) * time.Minute)
+	}
+
+	out := make([]sources.Candle, 0, stubPageSize)
 	end := before.UTC().Truncate(time.Minute)
-	for i := 1; i <= 1440; i++ {
-		out = append(out, sources.Candle{
-			Time: end.Add(-time.Duration(i) * time.Minute), VolumeUSD: vol, Close: 1,
-		})
+	for i := 1; i <= stubPageSize; i++ {
+		at := end.Add(-time.Duration(i) * time.Minute)
+		if !earliest.IsZero() && at.Before(earliest) {
+			break // the provider simply has nothing older
+		}
+		out = append(out, sources.Candle{Time: at, VolumeUSD: vol, Close: 1})
 	}
 	return out, nil
 }
@@ -84,6 +100,17 @@ func TestBackfillMakesBaselinesUsableImmediately(t *testing.T) {
 	}
 	if rep.Minutes != 1440 {
 		t.Fatalf("filled %d minutes, want 1440", rep.Minutes)
+	}
+	// The newest minutes belong to the live pipeline and must be untouched.
+	guard := DefaultBackfillOptions().LiveGuard
+	for i := 0; i < int(guard/time.Minute); i++ {
+		m := now.Add(-time.Duration(i) * time.Minute)
+		if _, ok := eng.Snapshot(bfToken, m).Baselines[volume.Window10m]; !ok {
+			t.Fatalf("unexpected snapshot shape")
+		}
+		if eng.SealedCount(bfToken.Key(), m.Add(time.Minute), 1) != 0 {
+			t.Fatalf("minute %v is inside the live guard and must not be sealed by backfill", m)
+		}
 	}
 
 	snap := eng.Snapshot(bfToken, now.Add(-time.Minute))
@@ -255,5 +282,87 @@ func TestSelectPoolsTakesVolumeNotCount(t *testing.T) {
 	}
 	if share < 0.95 {
 		t.Fatalf("share = %v", share)
+	}
+}
+
+func TestBackfillDoesNotWriteMinutesTheLivePipelineStillOwns(t *testing.T) {
+	// Backfill writes sealed buckets. The newest minutes are still filling and
+	// still waiting out the seal delay for late trades, so writing them here
+	// would freeze a provider's figure into a minute the pipeline was about to
+	// fill itself and make every real trade for it arrive too late to count.
+	h := &stubHistory{perPool: map[string]float64{"A": 100}}
+	bf, eng, _ := newBackfiller(t, h)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	bf.Run(context.Background(), bfToken, poolsFor(1000), now)
+
+	// The minute one step back is inside the guard: a live trade must still
+	// land in it.
+	live := now.Add(-time.Minute)
+	if !eng.Ingest(domain.Trade{
+		Timestamp: live.Add(10 * time.Second), Chain: bfToken.Chain,
+		TokenAddress: bfToken.Address, TxHash: "0xlive", USDVolume: 500,
+		Side: domain.SideBuy,
+	}) {
+		t.Fatal("a recent minute was sealed by backfill, so live trades are being dropped")
+	}
+	if got := eng.Snapshot(bfToken, live).Current.Total; got != 500 {
+		t.Fatalf("live minute total = %v, want the real trade at 500", got)
+	}
+}
+
+func TestBackfillStopsWhereTheProvidersHistoryStops(t *testing.T) {
+	// A token listed eight hours ago has no candles before that. Writing those
+	// minutes as confirmed zeros would drag the 24h median down and inflate
+	// every percentage measured against it — the direction that fabricates
+	// alerts.
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	h := &stubHistory{
+		perPool: map[string]float64{"A": 100},
+		depth:   map[string]int{"A": 480}, // history begins eight hours ago
+		origin:  now,
+	}
+	bf, eng, _ := newBackfiller(t, h)
+
+	rep := bf.Run(context.Background(), bfToken, poolsFor(1000), now)
+	if !rep.Filled {
+		t.Fatalf("what history exists should still be filled: %s", rep.Reason)
+	}
+	// The window ends at the live guard, so the covered span is the eight
+	// hours of history minus that guard.
+	guard := int(DefaultBackfillOptions().LiveGuard / time.Minute)
+	wantFilled := 480 - guard
+	if rep.Minutes != wantFilled {
+		t.Fatalf("filled %d minutes, want the %d the provider actually covered", rep.Minutes, wantFilled)
+	}
+	if rep.Minutes+rep.Skipped != 1440 {
+		t.Fatalf("filled %d + skipped %d should account for the whole window", rep.Minutes, rep.Skipped)
+	}
+
+	// Every filled minute carries real volume; none is a fabricated zero.
+	end := now.Add(-DefaultBackfillOptions().LiveGuard)
+	total, healthy, _ := eng.Sum(bfToken.Key(), end.Add(-time.Duration(wantFilled)*time.Minute), end)
+	if healthy != wantFilled || total != float64(wantFilled)*100 {
+		t.Fatalf("sum = %v over %d minutes, want %d covered", total, healthy, wantFilled)
+	}
+}
+
+func TestBackfillReportsWhenHistoryMissesTheWindowEntirely(t *testing.T) {
+	// A pool that answers but whose history does not reach the window at all
+	// must produce nothing rather than 1,440 zeros.
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	h := &stubHistory{
+		perPool: map[string]float64{"A": 100},
+		depth:   map[string]int{"A": 1}, // one minute of history, inside the live guard
+		origin:  now,
+	}
+	bf, eng, _ := newBackfiller(t, h)
+
+	rep := bf.Run(context.Background(), bfToken, poolsFor(1000), now)
+	if rep.Minutes > 1 {
+		t.Fatalf("filled %d minutes from one candle of history", rep.Minutes)
+	}
+	if eng.SealedCount(bfToken.Key(), now, volume.Window24h) > 1 {
+		t.Fatal("almost nothing should have been written")
 	}
 }

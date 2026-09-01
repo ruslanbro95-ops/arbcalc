@@ -34,6 +34,10 @@ type Notifier interface {
 // would look like an outage and cost a whole minute of data.
 const tradeBuffer = 4096
 
+// alertBuffer sizes the hand-off between judging and delivering. Filling it
+// means Telegram has been unreachable for a very long time.
+const alertBuffer = 256
+
 // Service runs the whole pipeline.
 type Service struct {
 	static    config.Static
@@ -50,6 +54,7 @@ type Service struct {
 
 	notifier Notifier
 	trades   chan domain.Trade
+	outbox   chan outgoing
 
 	mu sync.RWMutex
 	// lastSealed is the most recent minute that has been closed and judged.
@@ -88,6 +93,7 @@ func New(
 		health:       newHealthTracker(),
 		log:          log.With("component", "service"),
 		trades:       make(chan domain.Trade, tradeBuffer),
+		outbox:       make(chan outgoing, alertBuffer),
 		rediscover:   make(chan struct{}, 1),
 		poolsByToken: map[string][]domain.Pool{},
 		backfillDone: map[string]bool{},
@@ -119,6 +125,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.pollLoop,
 		s.priceLoop,
 		s.sealLoop,
+		s.deliverLoop,
 		s.discoveryLoop,
 		s.backfillLoop,
 		s.maintenanceLoop,
@@ -303,7 +310,14 @@ func (s *Service) judge(ctx context.Context, rt config.Runtime, tok domain.Token
 		Cooldown:         time.Duration(rt.CooldownMinutes) * time.Minute,
 		EscalationFactor: rt.EscalationFactor,
 	}
-	decision := s.alerts.Decide(tok.Key(), res, time.Now().UTC(), policy)
+	// The minute being judged, not the wall clock. Every rule the manager
+	// applies is stated in market minutes — "cooldown 5 minutes", "one
+	// continuing anomaly is one message" — and sealDue is built to walk a
+	// backlog, judging skipped minutes back to back within the same
+	// millisecond. Measured on the wall clock the cooldown would never elapse
+	// during a catch-up, so a stall would silently collapse hours of separate
+	// events into a single message, precisely when alerts matter most.
+	decision := s.alerts.Decide(tok.Key(), res, snap.Minute, policy)
 	if !decision.Send {
 		s.log.Debug("alert suppressed",
 			"token", tok.Key(), "reason", decision.Reason, "pct", res.Primary.Pct)
@@ -313,14 +327,53 @@ func (s *Service) judge(ctx context.Context, rt config.Runtime, tok domain.Token
 		return
 	}
 
-	msg := alert.Render(res, decision)
-	if err := s.notifier.Notify(ctx, msg); err != nil {
-		s.log.Error("could not deliver alert", "token", tok.Key(), "err", err)
-		return
+	// Hand off rather than send inline. Delivery used to happen here, inside
+	// sealMinute, inside the one-second seal loop, against a client with a
+	// 90-second HTTP timeout — so one slow send stalled minute sealing for as
+	// long as it took, and a market-wide move alerting several tokens at once
+	// stalled it for minutes. That backlog then fed straight back into the
+	// alerting logic as a catch-up.
+	out := outgoing{token: tok.Key(), msg: alert.Render(res, decision), decision: decision, primary: res.Primary, volume: res.Volume}
+	select {
+	case s.outbox <- out:
+	default:
+		// The queue is deep enough that filling it means Telegram has been
+		// unreachable for a long time. Dropping one alert is better than
+		// stalling data collection for every token.
+		s.log.Error("alert dropped: delivery queue is full",
+			"token", tok.Key(), "queued", len(s.outbox))
 	}
-	s.log.Info("alert sent",
-		"token", tok.Key(), "reason", decision.Reason,
-		"window", res.Primary.Window, "pct", res.Primary.Pct, "volume", res.Volume)
+}
+
+// outgoing is one rendered alert waiting to be delivered.
+type outgoing struct {
+	token    string
+	msg      alert.Message
+	decision alert.Decision
+	primary  detect.Change
+	volume   float64
+}
+
+// deliverLoop is the only place that talks to the notifier, so a slow or
+// unreachable Telegram costs delivery latency and nothing else.
+func (s *Service) deliverLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case out := <-s.outbox:
+			if err := s.notifier.Notify(ctx, out.msg); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				s.log.Error("could not deliver alert", "token", out.token, "err", err)
+				continue
+			}
+			s.log.Info("alert sent",
+				"token", out.token, "reason", out.decision.Reason,
+				"window", out.primary.Window, "pct", out.primary.Pct, "volume", out.volume)
+		}
+	}
 }
 
 // discoveryLoop refreshes the pool set on a timer and on demand.
@@ -352,9 +405,28 @@ func (s *Service) runDiscovery(ctx context.Context) {
 	}
 
 	res := s.discovery.Run(ctx, rt.Tokens)
+
+	tracked := map[domain.Chain]int{}
+	for _, t := range rt.Tokens {
+		if t.Enabled {
+			tracked[t.Chain]++
+		}
+	}
+
 	for chain, src := range s.sources {
-		src.SetPools(res.ByChain[chain])
 		src.SetTokens(rt.Tokens)
+
+		// A pass that came back empty for a chain we are tracking is far more
+		// likely to be both aggregators failing than every pool vanishing at
+		// once. Pushing it would erase a working pool set on a transient 429,
+		// so the previous one is kept and the source reports itself uncovered
+		// until discovery succeeds again.
+		if len(res.ByChain[chain]) == 0 && tracked[chain] > 0 {
+			s.log.Warn("discovery returned no pools; keeping the previous set",
+				"chain", chain, "tracked_tokens", tracked[chain])
+			continue
+		}
+		src.SetPools(res.ByChain[chain])
 	}
 	s.prices.TrackQuoteAssets(res.QuoteAssets)
 

@@ -90,3 +90,28 @@ func TestParseEnvLine(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadFillsInMissingWindows(t *testing.T) {
+	// The detector treats an absent window as enabled while the bot prints it
+	// as off, so a partial map would make /settings report the opposite of
+	// what the service does.
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"threshold_pct":30,"windows":{"10":false}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(path)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	rt := s.Get()
+
+	if on, set := rt.Windows[10]; !set || on {
+		t.Fatalf("the file's own value must survive: %v %v", on, set)
+	}
+	for _, w := range []int{30, 60, 1440} {
+		if on, set := rt.Windows[w]; !set || !on {
+			t.Errorf("window %d = %v (set %v), want it filled in as enabled", w, on, set)
+		}
+	}
+}

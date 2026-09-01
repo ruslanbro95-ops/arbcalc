@@ -361,15 +361,64 @@ func TestLongGapIsWalkedInChunks(t *testing.T) {
 	}
 }
 
-func TestNoPoolsIsHealthyNotAnOutage(t *testing.T) {
+func TestNothingTrackedIsHealthy(t *testing.T) {
+	// No tokens and no pools: the chain is genuinely idle for us, and the
+	// minutes it produces are real zeros.
 	n := &node{head: 1000, blockTime: time.Now().Unix()}
 	s := newSource(t, n, fixedPrices{})
 	s.SetPools(nil)
+	s.SetTokens(nil)
 
 	if got := drain(t, s); len(got) != 0 {
 		t.Fatalf("got %+v", got)
 	}
 	if !s.Healthy() {
-		t.Fatal("having nothing to watch is a healthy state: those minutes are real zeros")
+		t.Fatal("with nothing on the watch list there is nothing to miss")
+	}
+}
+
+func TestTrackedTokensWithNoPoolsIsNotHealthy(t *testing.T) {
+	// Tokens on the watch list but no pools known for them means this chain is
+	// not being covered at all. Reporting health would seal those minutes as
+	// confirmed zeros, sink every median, and make the first minute after
+	// pools come back read as a spike — which is exactly what a transient
+	// discovery failure would produce.
+	n := &node{head: 1000, blockTime: time.Now().Unix()}
+	s := newSource(t, n, fixedPrices{})
+	s.SetPools(nil) // discovery came back empty
+
+	if got := drain(t, s); len(got) != 0 {
+		t.Fatalf("got %+v", got)
+	}
+	if s.Healthy() {
+		t.Fatal("uncovered minutes must be MISSING, not confirmed zeros")
+	}
+}
+
+func TestIncompleteCatchUpIsNotHealthy(t *testing.T) {
+	// A bounded catch-up that did not reach the head is still behind. The
+	// trades it emits carry old block timestamps the engine rejects as late,
+	// so claiming health would seal the current minutes as real zeros while
+	// the backlog is still draining.
+	n := &node{head: 1000, blockTime: time.Now().Unix()}
+	s := newSource(t, n, fixedPrices{tokenAddr: 2})
+	drain(t, s) // seed at 998
+
+	n.mu.Lock()
+	n.head = 50_000 // far beyond MaxCatchUpChunks * MaxBlockRange
+	n.mu.Unlock()
+
+	drain(t, s)
+	if s.Healthy() {
+		t.Fatal("still behind the head after the chunk budget ran out")
+	}
+
+	// Once it does catch up, health returns.
+	n.mu.Lock()
+	n.head = s.LastBlock() + 10
+	n.mu.Unlock()
+	drain(t, s)
+	if !s.Healthy() {
+		t.Fatal("caught up, so it should report healthy again")
 	}
 }

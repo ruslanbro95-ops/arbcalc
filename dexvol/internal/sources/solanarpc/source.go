@@ -263,7 +263,13 @@ func (s *Source) Poll(ctx context.Context, out chan<- domain.Trade) error {
 	s.mu.RUnlock()
 
 	if len(pools) == 0 {
-		s.setHealthy(true)
+		// Healthy only when nothing is being tracked here either. Tokens with
+		// no known pools mean the chain is uncovered, and calling that healthy
+		// would turn the gap into confirmed zero-volume minutes.
+		s.mu.RLock()
+		tracking := len(s.tokens)
+		s.mu.RUnlock()
+		s.setHealthy(tracking == 0)
 		return nil
 	}
 	sort.Slice(pools, func(i, j int) bool { return pools[i].Address < pools[j].Address })

@@ -1,6 +1,7 @@
 package alert
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -210,17 +211,31 @@ func (s *state) record(exceeded []detect.Change) {
 	}
 }
 
-// maxRungs bounds the ladder so a pathological percentage cannot spin the loop.
-const maxRungs = 64
-
 // rungsCleared counts how many times pct has multiplied past the anchor by the
 // factor: anchor*f, anchor*f^2, and so on.
+//
+// Computed rather than counted in a loop. The loop needed a cap to stay
+// bounded, and a cap silently disables escalation for the rest of the episode:
+// once both the reached and the announced rung saturate at the same number,
+// "reached > announced" can never be true again no matter how far the anomaly
+// runs.
 func rungsCleared(pct, anchor, factor float64) int {
-	if anchor <= 0 || factor <= 1 || pct <= 0 {
+	if anchor <= 0 || factor <= 1 || pct <= 0 || pct < anchor*factor {
 		return 0
 	}
-	n := 0
-	for level := anchor * factor; pct >= level && n < maxRungs; level *= factor {
+
+	n := int(math.Floor(math.Log(pct/anchor) / math.Log(factor)))
+	if n < 0 {
+		n = 0
+	}
+	// Logs are approximate, and a reading landing exactly on a rung is the
+	// ordinary case rather than a corner one, so settle the boundary by
+	// comparison. Each step is at least a factor apart, so this corrects by at
+	// most one.
+	for n > 0 && pct < anchor*math.Pow(factor, float64(n)) {
+		n--
+	}
+	for pct >= anchor*math.Pow(factor, float64(n+1)) {
 		n++
 	}
 	return n

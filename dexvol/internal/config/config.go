@@ -157,8 +157,17 @@ func (s *Store) Load() error {
 	if err := json.Unmarshal(b, &rt); err != nil {
 		return fmt.Errorf("parse %s: %w", s.path, err)
 	}
+	// Fill in any window the file does not mention. The detector treats an
+	// absent entry as enabled while /windows and /settings print it as off, so
+	// a partial map — a hand-edited file, or a state file written before a new
+	// window existed — would make the bot report the opposite of what it does.
 	if rt.Windows == nil {
-		rt.Windows = DefaultRuntime().Windows
+		rt.Windows = map[int]bool{}
+	}
+	for w, on := range DefaultRuntime().Windows {
+		if _, set := rt.Windows[w]; !set {
+			rt.Windows[w] = on
+		}
 	}
 	if rt.EscalationFactor <= 1 {
 		rt.EscalationFactor = DefaultRuntime().EscalationFactor

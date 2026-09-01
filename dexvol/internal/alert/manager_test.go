@@ -444,3 +444,23 @@ func TestLadderSendsOncePerThresholdCrossed(t *testing.T) {
 		}
 	}
 }
+
+func TestLadderDoesNotSaturate(t *testing.T) {
+	// The ladder used to be counted in a capped loop, and the cap disabled
+	// escalation permanently: once the reached and the announced rung both sat
+	// at the ceiling, no further growth could ever exceed it.
+	if got := rungsCleared(1e30, 30, 1.5); got < 100 {
+		t.Fatalf("rungs = %d, want an unbounded count for an astronomical move", got)
+	}
+
+	m := NewManager()
+	p := policy()
+	m.Decide("k", daily(30), base(), p)
+	// A move so large the old loop saturated, followed by a larger one still.
+	if d := m.Decide("k", daily(1e30), base().Add(time.Minute), p); !d.Send {
+		t.Fatal("the first enormous move must escalate")
+	}
+	if d := m.Decide("k", daily(1e34), base().Add(2*time.Minute), p); !d.Send {
+		t.Fatal("growth past a saturating ladder must still escalate")
+	}
+}

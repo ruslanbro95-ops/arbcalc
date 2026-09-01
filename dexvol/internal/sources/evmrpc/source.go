@@ -139,9 +139,13 @@ func (s *Source) poolAddresses() []string {
 func (s *Source) Poll(ctx context.Context, out chan<- domain.Trade) error {
 	addresses := s.poolAddresses()
 	if len(addresses) == 0 {
-		// Nothing to watch is a healthy state, not an outage: the minutes it
-		// produces are genuine zeros.
-		s.setHealthy(true)
+		// Having nothing to watch is only a healthy state when there is also
+		// nothing being tracked. With tokens on the watch list but no pools
+		// known for them, this chain is simply not covered — and reporting
+		// health would seal those minutes as confirmed zeros, drag every
+		// median down, and make the first minute after pools return read as a
+		// spike. Discovery failing transiently is exactly how that happens.
+		s.setHealthy(!s.tracksTokens())
 		return nil
 	}
 
@@ -196,8 +200,20 @@ func (s *Source) Poll(ctx context.Context, out chan<- domain.Trade) error {
 		from = to + 1
 	}
 
-	s.setHealthy(true)
+	// Caught up only if the walk actually reached the safe head. Bounded
+	// catch-up means a long outage takes several polls to drain, and during
+	// them the trades being emitted carry old block timestamps that the engine
+	// rejects as too late. Claiming health there would seal the current
+	// minutes as real zeros while the backlog is still being read.
+	s.setHealthy(from > safeHead)
 	return nil
+}
+
+// tracksTokens reports whether the watch list holds anything on this chain.
+func (s *Source) tracksTokens() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.tokens) > 0
 }
 
 // emit decodes logs into trades and sends them downstream.
