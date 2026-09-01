@@ -176,15 +176,10 @@ func (s *Source) Skipped() []domain.Pool {
 	return out
 }
 
-// PollableAddress reports whether an identifier is a contract address, the
-// only thing an eth_getLogs address filter accepts: 0x and 40 hex digits.
-func PollableAddress(id string) bool {
-	if len(id) != 42 || !strings.EqualFold(id[:2], "0x") {
-		return false
-	}
-	_, err := hex.DecodeString(id[2:])
-	return err == nil
-}
+// PollableAddress reports whether an identifier can go into an eth_getLogs
+// address filter. The rule lives in the domain registry because the history
+// backfill needs the same answer.
+func PollableAddress(id string) bool { return domain.IsContractAddress(id) }
 
 // SetTokens tells the source which tokens are being tracked, so a swap can be
 // attributed to the right watch-list entry.

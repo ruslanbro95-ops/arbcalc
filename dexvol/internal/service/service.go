@@ -517,7 +517,7 @@ func (s *Service) backfillNext(ctx context.Context) {
 			continue
 		}
 
-		rep := s.backfill.Run(ctx, tok, pools, now)
+		rep := s.backfill.Run(ctx, tok, ingestablePools(tok.Chain, pools), now)
 		if ctx.Err() != nil {
 			return
 		}
@@ -595,4 +595,33 @@ func (s *Service) TokensChanged() {
 	case s.rediscover <- struct{}{}:
 	default:
 	}
+}
+
+// ingestablePools narrows a token's pools to the ones the live pipeline can
+// actually read.
+//
+// The baseline and the minute measured against it have to be built from the
+// same set of pools, and on an EVM chain they are not by default. Discovery
+// returns Uniswap V4 pools, GeckoTerminal serves their history happily, and
+// eth_getLogs cannot subscribe to a 32-byte pool id. Backfilling them would
+// build a 24-hour median out of volume this pipeline structurally cannot see,
+// so every real minute would measure small against it and the token would
+// quietly stop alerting — the worst failure available here, because it looks
+// exactly like a quiet market.
+//
+// Narrowing also fixes the volume-share test that guards the backfill: it is
+// then asking "did we get the history of the pools we watch", which is a
+// question with a useful answer, instead of "did we get the history of pools
+// we cannot read", which is not.
+func ingestablePools(chain domain.Chain, pools []domain.Pool) []domain.Pool {
+	if !chain.IsEVM() {
+		return pools
+	}
+	out := make([]domain.Pool, 0, len(pools))
+	for _, p := range pools {
+		if domain.IsContractAddress(p.Address) {
+			out = append(out, p)
+		}
+	}
+	return out
 }

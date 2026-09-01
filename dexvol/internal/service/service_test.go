@@ -523,3 +523,28 @@ func TestMuteExpiryRestoresDelivery(t *testing.T) {
 		t.Fatalf("got %d alerts, want 1 once the mute has expired", notifier.count())
 	}
 }
+
+func TestBackfillIgnoresPoolsTheLiveFeedCannotRead(t *testing.T) {
+	// A Uniswap V4 pool id is 32 bytes. The history provider serves it, and
+	// eth_getLogs cannot subscribe to it — so its volume would enter the
+	// baseline and never enter a live minute. The token would then measure
+	// small against its own median forever and simply stop alerting, which
+	// looks identical to a quiet market.
+	const v4 = "0x54f7883914619af9105355bf83ed678bcf9f63560218ac61c9963b9503d0ba32"
+	pools := []domain.Pool{
+		{Chain: domain.ChainBase, Address: "0x1111111111111111111111111111111111111111", Volume24hUSD: 100},
+		{Chain: domain.ChainBase, Address: v4, Volume24hUSD: 900},
+	}
+
+	got := ingestablePools(domain.ChainBase, pools)
+	if len(got) != 1 || got[0].Address != "0x1111111111111111111111111111111111111111" {
+		t.Fatalf("kept %+v, want only the contract-addressed pool", got)
+	}
+
+	// Solana pool ids are base58 and every one of them is readable, so the
+	// filter must not touch that chain.
+	sol := []domain.Pool{{Chain: domain.ChainSolana, Address: "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"}}
+	if len(ingestablePools(domain.ChainSolana, sol)) != 1 {
+		t.Fatal("a non-EVM chain must keep all of its pools")
+	}
+}

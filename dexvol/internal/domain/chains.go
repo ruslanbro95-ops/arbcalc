@@ -196,3 +196,24 @@ func ChainNames() []string {
 	sort.Strings(out)
 	return out
 }
+
+// IsContractAddress reports whether an identifier is a contract address —
+// 0x and 40 hex digits — rather than something else a provider may return in
+// the same field, such as a 32-byte Uniswap V4 pool id.
+//
+// It lives in domain because two layers need the same answer for different
+// reasons: ingestion cannot put a non-address into an eth_getLogs filter, and
+// the history backfill must not build a baseline out of pools the live feed
+// will never read.
+func IsContractAddress(id string) bool {
+	if len(id) != 42 || !strings.EqualFold(id[:2], "0x") {
+		return false
+	}
+	for i := 2; i < len(id); i++ {
+		c := id[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
