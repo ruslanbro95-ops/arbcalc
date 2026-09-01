@@ -390,3 +390,57 @@ func TestLoweringTheFactorMidEpisodeIsAlsoConsistent(t *testing.T) {
 		t.Fatalf("a finer ladder must not re-announce a level already reported, got %s", d.Reason)
 	}
 }
+
+// The owner's stated ladder, pinned to the digit: an opening alert at +50% puts
+// the next thresholds at 75, 112.5 and 168.75 — each one 1.5x the threshold
+// before it, all compounding from the opening value.
+func TestLadderThresholdsCompoundFromTheOpeningAlert(t *testing.T) {
+	const opening = 50.0
+	want := []float64{75, 112.5, 168.75, 253.125}
+
+	for i, threshold := range want {
+		rung := i + 1
+		// A hair under the threshold is still the previous rung.
+		if got := rungsCleared(threshold-0.001, opening, 1.5); got != rung-1 {
+			t.Errorf("just under %v: rung %d, want %d", threshold, got, rung-1)
+		}
+		// Exactly at it takes the next one.
+		if got := rungsCleared(threshold, opening, 1.5); got != rung {
+			t.Errorf("at %v: rung %d, want %d", threshold, got, rung)
+		}
+	}
+}
+
+// The same ladder driven through the manager, minute by minute, showing which
+// readings send and which stay silent.
+func TestLadderSendsOncePerThresholdCrossed(t *testing.T) {
+	m := NewManager()
+	p := policy() // cooldown 5m, factor 1.5
+
+	type step struct {
+		pct  float64
+		want bool
+	}
+	// Held inside the cooldown throughout, so every send here is the ladder's
+	// doing and not the cooldown expiring.
+	steps := []step{
+		{50, true},     // opening alert; thresholds become 75, 112.5, 168.75
+		{60, false},    // under 75
+		{74, false},    // still under 75
+		{75, true},     // takes rung 1
+		{90, false},    // same rung
+		{110, false},   // same rung
+		{112.5, true},  // takes rung 2
+		{140, false},   // same rung
+		{168.75, true}, // takes rung 3
+		{200, false},   // same rung
+	}
+
+	for i, s := range steps {
+		at := base().Add(time.Duration(i) * 10 * time.Second)
+		d := m.Decide("k", daily(s.pct), at, p)
+		if d.Send != s.want {
+			t.Errorf("+%.2f%% -> send=%v (%s), want send=%v", s.pct, d.Send, d.Reason, s.want)
+		}
+	}
+}
