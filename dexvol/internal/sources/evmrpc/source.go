@@ -70,6 +70,10 @@ type Source struct {
 	// unsupported remembers which pools were already reported, so a pool the
 	// decoder cannot read is logged once instead of on every poll.
 	unsupported map[string]bool
+	// skipped holds discovered pools whose identifier is not a contract
+	// address — Uniswap V4 pool ids, mostly. They are a known coverage gap,
+	// kept so the gap can be reported instead of vanishing.
+	skipped []domain.Pool
 }
 
 func NewSource(chain domain.Chain, rpc *RPC, prices PriceLookup, opts Options, log *slog.Logger) *Source {
@@ -96,16 +100,58 @@ func (s *Source) Healthy() bool {
 }
 
 // SetPools replaces the watched pool set after a discovery run.
+//
+// Identifiers that are not contract addresses are dropped here, and that is
+// not tidiness. eth_getLogs rejects the entire filter when one entry of its
+// address array is not 20 bytes, so a single Uniswap V4 pool id — 32 bytes,
+// and routinely listed by DEX Screener — would fail every poll on the chain
+// and take every token on it down as an unbroken run of MISSING minutes.
+// Dropping that one pool costs its volume; keeping it costs the chain.
 func (s *Source) SetPools(pools []domain.Pool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pools = make(map[string]domain.Pool, len(pools))
+	s.skipped = nil
 	for _, p := range pools {
 		if p.Chain != s.chain {
 			continue
 		}
+		if !PollableAddress(p.Address) {
+			s.skipped = append(s.skipped, p)
+			continue
+		}
 		s.pools[strings.ToLower(p.Address)] = p
 	}
+	if len(s.skipped) > 0 {
+		sort.Slice(s.skipped, func(i, j int) bool {
+			return s.skipped[i].Volume24hUSD > s.skipped[j].Volume24hUSD
+		})
+		s.log.Warn("pools dropped: identifier is not a contract address",
+			"count", len(s.skipped), "largest", s.skipped[0].Address,
+			"largest_volume_24h_usd", s.skipped[0].Volume24hUSD)
+	}
+}
+
+// Skipped lists the discovered pools this source cannot poll, largest first.
+//
+// cmd/coverage reports them with their 24h volume so the gap they leave is a
+// number in the coverage table rather than an unexplained shortfall.
+func (s *Source) Skipped() []domain.Pool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Pool, len(s.skipped))
+	copy(out, s.skipped)
+	return out
+}
+
+// PollableAddress reports whether an identifier is a contract address, the
+// only thing an eth_getLogs address filter accepts: 0x and 40 hex digits.
+func PollableAddress(id string) bool {
+	if len(id) != 42 || !strings.EqualFold(id[:2], "0x") {
+		return false
+	}
+	_, err := hex.DecodeString(id[2:])
+	return err == nil
 }
 
 // SetTokens tells the source which tokens are being tracked, so a swap can be

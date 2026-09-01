@@ -32,6 +32,7 @@ type node struct {
 	getLogsN  int
 	lastFrom  string
 	lastTo    string
+	lastAddrs []string
 	blockTime int64
 }
 
@@ -84,6 +85,10 @@ func (n *node) handle(w http.ResponseWriter, r *http.Request) {
 		if f, ok := req.Params[0].(map[string]any); ok {
 			n.lastFrom, _ = f["fromBlock"].(string)
 			n.lastTo, _ = f["toBlock"].(string)
+			n.lastAddrs = nil
+			for _, a := range f["address"].([]any) {
+				n.lastAddrs = append(n.lastAddrs, a.(string))
+			}
 		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"jsonrpc": "2.0", "id": req.ID, "result": n.logs,
@@ -420,5 +425,52 @@ func TestIncompleteCatchUpIsNotHealthy(t *testing.T) {
 	drain(t, s)
 	if !s.Healthy() {
 		t.Fatal("caught up, so it should report healthy again")
+	}
+}
+
+func TestNonAddressPoolIDsAreDroppedNotSentToGetLogs(t *testing.T) {
+	// A Uniswap V4 pool id is 32 bytes, and DEX Screener returns it in the
+	// same field as a contract address. Sent through, it makes the node reject
+	// the whole filter as invalid params, so every token on the chain goes
+	// MISSING for as long as that pool is listed — a far bigger loss than the
+	// one pool's volume.
+	const v4ID = "0x54f7883914619af9105355bf83ed678bcf9f63560218ac61c9963b9503d0ba32"
+
+	n := &node{head: 1000, blockTime: time.Date(2026, 9, 1, 12, 30, 0, 0, time.UTC).Unix()}
+	s := newSource(t, n, fixedPrices{tokenAddr: 2})
+	s.SetPools([]domain.Pool{
+		{Chain: domain.ChainBase, Address: poolAddr, DEX: "uniswap"},
+		{Chain: domain.ChainBase, Address: v4ID, DEX: "uniswap", Volume24hUSD: 1_000_000},
+	})
+	drain(t, s) // seed
+	n.head = 1100
+	drain(t, s)
+
+	if len(n.lastAddrs) != 1 || !strings.EqualFold(n.lastAddrs[0], poolAddr) {
+		t.Fatalf("getLogs address filter = %v, want only %s", n.lastAddrs, poolAddr)
+	}
+	skipped := s.Skipped()
+	if len(skipped) != 1 || skipped[0].Address != v4ID {
+		t.Fatalf("Skipped() = %v, want the v4 pool kept so coverage can price the gap", skipped)
+	}
+}
+
+func TestPollableAddress(t *testing.T) {
+	for _, tc := range []struct {
+		id   string
+		want bool
+	}{
+		{"0x1111111111111111111111111111111111111111", true},
+		{"0X1111111111111111111111111111111111111111", true},
+		{"0x54f7883914619af9105355bf83ed678bcf9f63560218ac61c9963b9503d0ba32", false},
+		{"0x9D0D36cC9E989598F01A4656E0efFf73896c30ed-0xE0f63A424a4439cBE457D80E4f4b51aD25b2c56C", false},
+		{"0x11111111111111111111111111111111111111", false},
+		{"0xzzzz111111111111111111111111111111111111", false},
+		{"1111111111111111111111111111111111111111", false},
+		{"", false},
+	} {
+		if got := PollableAddress(tc.id); got != tc.want {
+			t.Errorf("PollableAddress(%q) = %v, want %v", tc.id, got, tc.want)
+		}
 	}
 }

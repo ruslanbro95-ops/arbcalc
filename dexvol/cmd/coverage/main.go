@@ -95,6 +95,7 @@ func run() error {
 	fmt.Println()
 	res := discovery.Run(ctx, tokens)
 	reportDiscovery(res)
+	reportUnpollable(res)
 
 	if *discoveryOnly {
 		return nil
@@ -476,4 +477,45 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// reportUnpollable prints the discovered pools the ingestion layer has to leave
+// alone, with the volume that leaves on the table.
+//
+// A Uniswap V4 pool is identified by a 32-byte pool id, not a contract
+// address, and eth_getLogs only takes addresses. The spec is explicit that a
+// missed pool has to be reported with its contribution in USD rather than
+// disappear into an unexplained shortfall, so this is the line item that
+// explains a coverage figure below 100% on a chain where V4 is busy.
+func reportUnpollable(res service.DiscoveryResult) {
+	var rows []domain.Pool
+	for chain, pools := range res.ByChain {
+		if !chain.IsEVM() {
+			continue
+		}
+		for _, p := range pools {
+			if !evmrpc.PollableAddress(p.Address) {
+				rows = append(rows, p)
+			}
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Volume24hUSD > rows[j].Volume24hUSD })
+
+	var total float64
+	for _, p := range rows {
+		total += p.Volume24hUSD
+	}
+
+	fmt.Printf("\nPools that cannot be polled — the identifier is a pool id, not a contract\n"+
+		"address, so `eth_getLogs` cannot subscribe to it. %d pool(s), %s of reported\n"+
+		"24h volume, and this is the first thing to subtract from the numbers below.\n\n",
+		len(rows), alert.FormatUSD(total))
+	fmt.Println("| Chain | DEX | Pool id | 24h volume (USD) |")
+	fmt.Println("|---|---|---|---|")
+	for _, p := range rows {
+		fmt.Printf("| %s | %s | `%s` | %s |\n", p.Chain, p.DEX, p.Address, usdOrDash(p.Volume24hUSD))
+	}
 }
