@@ -129,3 +129,24 @@ func TestHealthCountsSealedMinutes(t *testing.T) {
 		t.Fatalf("health = %d/%d, want 3/6", healthy, total)
 	}
 }
+
+func TestSumCountsOnlyHealthySealedMinutes(t *testing.T) {
+	s := NewSeries()
+	for i := 1; i <= 5; i++ {
+		s.Add(at(i), true, 100)
+		s.Seal(at(i), true)
+	}
+	for i := 6; i <= 8; i++ {
+		s.Seal(at(i), false) // outage
+	}
+	// Minute 9 is still open and must not be counted.
+	s.Add(at(9), true, 999)
+
+	total, healthy, sealed := s.Sum(at(1), at(10))
+	if total != 500 {
+		t.Fatalf("total = %v, want 500", total)
+	}
+	if healthy != 5 || sealed != 8 {
+		t.Fatalf("healthy/sealed = %d/%d, want 5/8", healthy, sealed)
+	}
+}

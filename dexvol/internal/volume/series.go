@@ -230,3 +230,29 @@ func (s *Series) restore(b Bucket) error {
 	s.buckets[k] = &cp
 	return nil
 }
+
+// Sum totals the sealed, healthy minutes in [from, to).
+//
+// It reports the healthy and total counts alongside the sum so a caller can
+// tell a genuinely quiet hour from an hour the sources only half covered — the
+// difference that decides whether a coverage number means anything.
+func (s *Series) Sum(from, to time.Time) (total float64, healthy, sealed int) {
+	from = from.UTC().Truncate(time.Minute)
+	to = to.UTC().Truncate(time.Minute)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for m := from; m.Before(to); m = m.Add(time.Minute) {
+		b := s.buckets[minuteKey(m)]
+		if b == nil || !b.Sealed {
+			continue
+		}
+		sealed++
+		if b.Quality != QualityOK {
+			continue
+		}
+		healthy++
+		total += b.Total
+	}
+	return total, healthy, sealed
+}

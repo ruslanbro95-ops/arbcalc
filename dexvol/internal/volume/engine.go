@@ -144,3 +144,8 @@ func lower(s string) string {
 func (e *Engine) RestoreMinute(tokenKey string, b Bucket) error {
 	return e.seriesFor(tokenKey).restore(b)
 }
+
+// Sum totals a token's volume over [from, to). See Series.Sum.
+func (e *Engine) Sum(tokenKey string, from, to time.Time) (total float64, healthy, sealed int) {
+	return e.seriesFor(tokenKey).Sum(from, to)
+}
