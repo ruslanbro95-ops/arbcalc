@@ -134,3 +134,13 @@ func lower(s string) string {
 	}
 	return string(b)
 }
+
+// RestoreMinute reinstates a sealed bucket read back from disk.
+//
+// It exists so medians survive a restart: rebuilding a 24h baseline from live
+// data alone would leave the service unable to judge a full day of minutes.
+// Restored buckets arrive already sealed and keep their recorded quality, so a
+// past outage stays MISSING instead of returning as a real zero.
+func (e *Engine) RestoreMinute(tokenKey string, b Bucket) error {
+	return e.seriesFor(tokenKey).restore(b)
+}

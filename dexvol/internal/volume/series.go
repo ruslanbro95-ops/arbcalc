@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -208,4 +209,24 @@ func (s *Series) Health(endExclusive time.Time, window int) (healthy, total int)
 		}
 	}
 	return healthy, total
+}
+
+// restore inserts an already-sealed bucket, used when replaying persisted
+// state at startup. It refuses to overwrite a bucket the live feed has already
+// produced, so a slow restore cannot clobber fresher data.
+func (s *Series) restore(b Bucket) error {
+	if !b.Sealed {
+		return fmt.Errorf("restore: bucket for %s is not sealed", b.Minute)
+	}
+	k := minuteKey(b.Minute)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.buckets[k]; exists {
+		return nil
+	}
+	cp := b
+	cp.Minute = b.Minute.UTC().Truncate(time.Minute)
+	s.buckets[k] = &cp
+	return nil
 }
