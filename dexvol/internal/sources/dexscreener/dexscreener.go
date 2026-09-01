@@ -25,11 +25,6 @@ const DefaultBaseURL = "https://api.dexscreener.com"
 // Staying a little under it leaves room for the occasional retry.
 const rateLimit = 280
 
-// BatchSize is how many token addresses the /latest/dex/tokens endpoint accepts
-// in one call. Batching is what keeps price polling at four requests a minute
-// instead of four per token.
-const BatchSize = 30
-
 // chainID resolves the DEX Screener identifier from the shared chain registry,
 // so a network added there needs no edit here.
 func chainID(c domain.Chain) (string, bool) {
@@ -74,7 +69,10 @@ type pair struct {
 	// PriceUsd is a string in the API, and is empty for a pool with no
 	// resolvable USD route.
 	PriceUsd string `json:"priceUsd"`
-	Volume   struct {
+	// PriceNative is the base token priced in quote-token units, which is what
+	// lets a pool value its quote side too.
+	PriceNative string `json:"priceNative"`
+	Volume      struct {
 		H24 float64 `json:"h24"`
 		H6  float64 `json:"h6"`
 		H1  float64 `json:"h1"`
@@ -125,53 +123,84 @@ func (c *Client) DiscoverPools(ctx context.Context, tok domain.Token) ([]domain.
 	return out, nil
 }
 
-// Prices resolves USD prices for a batch of tokens.
+// Prices resolves USD prices, one request per token.
 //
-// Tokens are grouped by chain and then chunked, because the batch endpoint
-// takes one chain's worth of addresses at a time.
+// It used to batch addresses into /latest/dex/tokens/{a,b,c}. That endpoint
+// answers with pairs rather than with tokens, and it caps the answer at thirty
+// pairs in total — so one token with thirty pools of its own consumes the whole
+// response and every other address in the batch comes back with no price at
+// all. Measured: asking for CAKE and 牛来 together returns thirty CAKE pairs and
+// not one mention of 牛来, whose swaps were then dropped as unpriced and whose
+// measured coverage read 0%. Batching here was not an optimization, it was
+// silent data loss weighted towards exactly the tokens a watch list is least
+// likely to notice.
 func (c *Client) Prices(ctx context.Context, toks []domain.Token) (map[string]float64, error) {
 	out := make(map[string]float64, len(toks))
+	var firstErr error
 
-	byChain := map[domain.Chain][]domain.Token{}
 	for _, t := range toks {
-		byChain[t.Chain] = append(byChain[t.Chain], t)
-	}
-
-	for chain, list := range byChain {
-		if _, ok := chainID(chain); !ok {
+		id, ok := chainID(t.Chain)
+		if !ok || t.Address == "" {
 			continue
 		}
-		for start := 0; start < len(list); start += BatchSize {
-			end := min(start+BatchSize, len(list))
-			chunk := list[start:end]
-
-			addrs := make([]string, len(chunk))
-			for i, t := range chunk {
-				addrs[i] = t.Address
+		endpoint := fmt.Sprintf("%s/token-pairs/v1/%s/%s", c.baseURL, id, url.PathEscape(t.Address))
+		var pairs []pair
+		if err := c.http.GetJSON(ctx, endpoint, &pairs); err != nil {
+			// One token failing must not cost the others their price: a
+			// partial map still lets most trades be valued, and the ones that
+			// cannot be are counted as a coverage gap rather than as zero.
+			if firstErr == nil {
+				firstErr = err
 			}
-			endpoint := fmt.Sprintf("%s/latest/dex/tokens/%s", c.baseURL, url.PathEscape(strings.Join(addrs, ",")))
-
-			var resp tokensResponse
-			if err := c.http.GetJSON(ctx, endpoint, &resp); err != nil {
-				return out, err
-			}
-			// A token appears once per pool; the deepest pool is the most
-			// trustworthy quote, so the highest-liquidity pair wins.
-			best := map[string]float64{}
-			for _, p := range resp.Pairs {
-				price, err := strconv.ParseFloat(p.PriceUsd, 64)
-				if err != nil || price <= 0 {
-					continue
-				}
-				key := string(chain) + ":" + strings.ToLower(p.BaseToken.Address)
-				if p.Liquidity.USD >= best[key] {
-					best[key] = p.Liquidity.USD
-					out[key] = price
-				}
-			}
+			continue
+		}
+		if price, ok := priceFrom(pairs, t.Address); ok {
+			out[string(t.Chain)+":"+strings.ToLower(t.Address)] = price
 		}
 	}
-	return out, nil
+	return out, firstErr
+}
+
+// priceFrom picks the deepest pool that can value the token and reads the price
+// off whichever side of it the token sits on.
+//
+// Reading only the base side was the other half of the batching bug. A quote
+// asset like WETH is the base token of almost none of its pools, so it ended up
+// priced from whatever pair happened to come back — WETH measured $0.0000108,
+// which is the price of the memecoin it was paired against. A pool prices both
+// of its tokens: priceUsd is the base in dollars and priceNative is the base in
+// quote units, so the quote is worth priceUsd / priceNative.
+func priceFrom(pairs []pair, addr string) (float64, bool) {
+	want := strings.ToLower(addr)
+
+	var best, bestLiquidity float64
+	found := false
+	for _, p := range pairs {
+		usd, err := strconv.ParseFloat(p.PriceUsd, 64)
+		if err != nil || usd <= 0 {
+			continue
+		}
+
+		var price float64
+		switch want {
+		case strings.ToLower(p.BaseToken.Address):
+			price = usd
+		case strings.ToLower(p.QuoteToken.Address):
+			native, err := strconv.ParseFloat(p.PriceNative, 64)
+			if err != nil || native <= 0 {
+				continue
+			}
+			price = usd / native
+		default:
+			continue
+		}
+
+		// The deepest pool is the most trustworthy quote.
+		if !found || p.Liquidity.USD >= bestLiquidity {
+			found, best, bestLiquidity = true, price, p.Liquidity.USD
+		}
+	}
+	return best, found
 }
 
 // Volume reports DEX Screener's own aggregate for the token, summed across all

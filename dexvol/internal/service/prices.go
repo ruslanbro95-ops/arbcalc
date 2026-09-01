@@ -26,6 +26,9 @@ type PriceProvider interface {
 // trade is skipped, and the shortfall shows up as a coverage gap instead.
 const maxPriceAge = 10 * time.Minute
 
+// minRefreshAge is how long a usable quote is kept before we ask again.
+const minRefreshAge = 60 * time.Second
+
 type quote struct {
 	usd       float64
 	retrieved time.Time
@@ -76,14 +79,30 @@ func (c *PriceCache) TrackQuoteAssets(toks []domain.Token) {
 // Refresh re-prices the watch list plus the tracked quote assets.
 func (c *PriceCache) Refresh(ctx context.Context, tracked []domain.Token) error {
 	c.mu.RLock()
+	now := c.now()
+	// A quote that is still young is left alone. Pricing costs one request per
+	// token since the provider's batch endpoint turned out to drop tokens
+	// silently, and Refresh runs on every poll — without this floor a
+	// twelve-second cadence over a watch list and its quote assets would spend
+	// the whole allowance re-asking for prices that moved by fractions of a
+	// percent. maxPriceAge decides when a quote becomes unusable; this only
+	// decides how eagerly a usable one is replaced.
+	stale := func(k string) bool {
+		q, ok := c.quotes[k]
+		return !ok || now.Sub(q.retrieved) >= minRefreshAge
+	}
+
 	want := make([]domain.Token, 0, len(tracked)+len(c.extra))
-	want = append(want, tracked...)
 	seen := make(map[string]bool, len(tracked))
 	for _, t := range tracked {
-		seen[priceKey(t.Chain, t.Address)] = true
+		k := priceKey(t.Chain, t.Address)
+		seen[k] = true
+		if stale(k) {
+			want = append(want, t)
+		}
 	}
 	for k, t := range c.extra {
-		if !seen[k] {
+		if !seen[k] && stale(k) {
 			want = append(want, t)
 		}
 	}
@@ -97,7 +116,7 @@ func (c *PriceCache) Refresh(ctx context.Context, tracked []domain.Token) error 
 	// A partial result is still worth keeping: the provider may have answered
 	// for several chains before failing on one.
 	c.mu.Lock()
-	now := c.now()
+	now = c.now()
 	for k, v := range got {
 		if v > 0 {
 			c.quotes[k] = quote{usd: v, retrieved: now}

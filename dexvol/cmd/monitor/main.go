@@ -126,7 +126,7 @@ func buildSources(static config.Static, prices *service.PriceCache, log *slog.Lo
 			continue
 		}
 		opts := evmrpc.DefaultOptions()
-		opts.MaxAddressesPerCall = static.EVMMaxAddressesPerCall
+		opts.MaxAddressesPerCall = evmrpc.AddressCap(chain, static.EVMMaxAddressesPerCall)
 		out[chain] = evmrpc.NewSource(chain,
 			evmrpc.NewRPC(string(chain), url, rpcBudget(chain)),
 			prices, opts, log)

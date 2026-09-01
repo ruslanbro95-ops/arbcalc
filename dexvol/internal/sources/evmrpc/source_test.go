@@ -501,3 +501,19 @@ func TestAddressFilterIsSplitToWhatTheEndpointAccepts(t *testing.T) {
 		t.Fatalf("a filter carried %d addresses, want at most 9", len(n.lastAddrs))
 	}
 }
+
+func TestAddressCapPrefersTheOverrideThenTheEndpointsKnownLimit(t *testing.T) {
+	if got := AddressCap(domain.ChainEthereum, 0); got != 9 {
+		t.Errorf("ethereum cap = %d, want the publicnode limit of 9", got)
+	}
+	if got := AddressCap(domain.ChainEthereum, 50); got != 50 {
+		t.Errorf("override = %d, want 50: pointing RPC_* at your own node must lift the cap", got)
+	}
+	if got := AddressCap(domain.ChainRobinhood, 0); got != 0 {
+		t.Errorf("robinhood cap = %d, want 0: its node takes the whole list, and splitting it "+
+			"only multiplied requests until the node rate limited us", got)
+	}
+	if got := AddressCap(domain.Chain("sui"), 0); got != 0 {
+		t.Errorf("unknown chain cap = %d, want 0", got)
+	}
+}

@@ -59,8 +59,8 @@ func run() error {
 			"check the chain registry's GeckoTerminal ids against the live network list and exit")
 		listNetworks = flag.String("list-networks", "",
 			"print every GeckoTerminal network whose id or name contains this text, then exit; pass \"all\" for the whole list")
-		maxAddresses = flag.Int("max-addresses", 9,
-			"how many pool addresses one eth_getLogs filter may hold; public endpoints reject ten or more outright")
+		maxAddresses = flag.Int("max-addresses", 0,
+			"override the per-chain eth_getLogs address-filter size; 0 uses each endpoint's known limit")
 		verbose = flag.Bool("v", false, "debug logging")
 	)
 	flag.Parse()
@@ -124,7 +124,7 @@ func run() error {
 	end := time.Now().UTC().Truncate(time.Minute)
 	fmt.Println("\n## Coverage")
 	fmt.Println()
-	return reportCoverage(ctx, engine, tokens, res, ds, gt, start, end)
+	return reportCoverage(ctx, engine, tokens, res, srcs, ds, gt, start, end)
 }
 
 // runVerifyNetworks checks every GeckoTerminal id in the chain registry against
@@ -254,7 +254,7 @@ func buildSources(res service.DiscoveryResult, tokens []domain.Token, prices *se
 			src = solanarpc.NewSource(solanarpc.NewRPC(url, 240), prices, solanarpc.DefaultOptions(), log)
 		} else if chain.IsEVM() {
 			opts := evmrpc.DefaultOptions()
-			opts.MaxAddressesPerCall = maxAddresses
+			opts.MaxAddressesPerCall = evmrpc.AddressCap(chain, maxAddresses)
 			src = evmrpc.NewSource(chain, evmrpc.NewRPC(string(chain), url, 120), prices, opts, log)
 		} else {
 			continue
@@ -410,6 +410,7 @@ func reportCoverage(
 	engine *volume.Engine,
 	tokens []domain.Token,
 	res service.DiscoveryResult,
+	srcs map[domain.Chain]service.TradeSource,
 	ds *dexscreener.Client,
 	gt *geckoterminal.Client,
 	start, end time.Time,
@@ -459,6 +460,7 @@ func reportCoverage(
 		fmt.Println("A too-late count this large is a timing fault, not a coverage one: the trades")
 		fmt.Println("were decoded and then dropped because their minute was already sealed.")
 	}
+	reportDrops(srcs)
 	fmt.Println()
 	fmt.Println("Neither reference is ground truth: both are indexers with their own gaps, so a")
 	fmt.Println("ratio above 100% means the on-chain pipeline saw pools that indexer did not.")
@@ -555,9 +557,11 @@ func reportUnpollable(res service.DiscoveryResult) {
 }
 
 // sealGrace is how long after a minute ends we still accept trades for it.
-// internal/service reads the same value from SEAL_DELAY; the measurement has no
+// internal/service reads the same value from SEAL_DELAY, and it has a floor:
+// confirmations x block time + poll interval, which is 36s on ethereum. The
+// measurement has no
 // settings file, so it is fixed here.
-const sealGrace = 20 * time.Second
+const sealGrace = 45 * time.Second
 
 // sealLimit is the newest minute that may be sealed at wall-clock now.
 //
@@ -570,4 +574,44 @@ const sealGrace = 20 * time.Second
 // the same correction, with the same comment.
 func sealLimit(now time.Time, grace time.Duration) time.Time {
 	return now.Add(-grace).Add(-time.Minute).Truncate(time.Minute)
+}
+
+// reportDrops prints what each chain's decoder threw away and why.
+//
+// Without it a shortfall has no address: an unpriced swap, a Swap layout the
+// decoder does not know, and a pool that never exposed token0() all read as
+// "we saw less volume than the aggregator". They are three different repairs.
+func reportDrops(srcs map[domain.Chain]service.TradeSource) {
+	type dropper interface{ Drops() evmrpc.Drops }
+
+	chains := make([]domain.Chain, 0, len(srcs))
+	for c, src := range srcs {
+		if _, ok := src.(dropper); ok {
+			chains = append(chains, c)
+		}
+	}
+	sort.Slice(chains, func(i, j int) bool { return chains[i] < chains[j] })
+
+	rows := make([]string, 0, len(chains))
+	for _, c := range chains {
+		d := srcs[c].(dropper).Drops()
+		if d == (evmrpc.Drops{}) {
+			continue
+		}
+		rows = append(rows, fmt.Sprintf("| %s | %d | %d | %d | %d | %d | %d |",
+			c, d.Unpriced, d.Undecodable, d.UnsupportedPool, d.NoBlockTime, d.ZeroAmount, d.OtherToken))
+	}
+	if len(rows) == 0 {
+		return
+	}
+
+	fmt.Println("Swaps read from the chain but not counted, by reason. `other token` is the")
+	fmt.Println("pool's opposite side and is not a loss; `unpriced` and `undecodable` are.")
+	fmt.Println()
+	fmt.Println("| Chain | unpriced | undecodable | pool unreadable | no block time | zero amount | other token |")
+	fmt.Println("|---|---|---|---|---|---|---|")
+	for _, r := range rows {
+		fmt.Println(r)
+	}
+	fmt.Println()
 }

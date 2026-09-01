@@ -33,6 +33,19 @@ type ChainInfo struct {
 	// RPCEnv is the environment variable that overrides DefaultRPC.
 	RPCEnv     string
 	DefaultRPC string
+	// MaxLogAddresses is how many addresses DefaultRPC accepts in one
+	// eth_getLogs filter, 0 when it takes as many as we have.
+	//
+	// It belongs next to DefaultRPC because it is a property of that endpoint,
+	// not of the chain: every publicnode URL here answers -32602 "Request
+	// blocked" at ten addresses — measured on all seven — and rejects the
+	// whole request rather than part of it. Robinhood Chain's own node was
+	// still answering at sixty, and capping it at nine there only multiplied
+	// the request count until that node started rate limiting us.
+	//
+	// EVM_MAX_ADDRESSES_PER_CALL overrides this for every chain, which is what
+	// you want after pointing RPC_* at your own node.
+	MaxLogAddresses int
 	// Aliases are what a person may type in a Telegram command.
 	Aliases []string
 }
@@ -48,14 +61,16 @@ var chainRegistry = []ChainInfo{
 		DexScreenerID: "ethereum", GeckoTerminalID: "eth",
 		GMGNSlug: "eth", OKXSlug: "ethereum",
 		RPCEnv: "RPC_ETHEREUM", DefaultRPC: "https://ethereum-rpc.publicnode.com",
-		Aliases: []string{"eth", "ethereum"},
+		MaxLogAddresses: 9,
+		Aliases:         []string{"eth", "ethereum"},
 	},
 	{
 		Chain: ChainBNB, EVM: true, ChainID: 56,
 		DexScreenerID: "bsc", GeckoTerminalID: "bsc",
 		GMGNSlug: "bsc", OKXSlug: "bsc",
 		RPCEnv: "RPC_BSC", DefaultRPC: "https://bsc-rpc.publicnode.com",
-		Aliases: []string{"bsc", "bnb", "bnbchain"},
+		MaxLogAddresses: 9,
+		Aliases:         []string{"bsc", "bnb", "bnbchain"},
 	},
 	{
 		Chain: ChainSolana, EVM: false,
@@ -69,14 +84,16 @@ var chainRegistry = []ChainInfo{
 		DexScreenerID: "base", GeckoTerminalID: "base",
 		GMGNSlug: "base", OKXSlug: "base",
 		RPCEnv: "RPC_BASE", DefaultRPC: "https://base-rpc.publicnode.com",
-		Aliases: []string{"base"},
+		MaxLogAddresses: 9,
+		Aliases:         []string{"base"},
 	},
 	{
 		// Robinhood Chain: an Arbitrum Orbit L2, mainnet since 2026-07-01.
 		// GeckoTerminal's id for it is "robinhood", confirmed against the
 		// live /networks list and against its pools and minute-OHLCV
 		// endpoints, so the chain has both discovery opinions and history
-		// backfill. GMGN does not list it, hence no button.
+		// backfill. GMGN does not list it, hence no button. Its own node takes
+		// sixty addresses in a getLogs filter, so no cap here.
 		Chain: ChainRobinhood, EVM: true, ChainID: 4663,
 		DexScreenerID: "robinhood", GeckoTerminalID: "robinhood",
 		GMGNSlug: "", OKXSlug: "",
@@ -93,28 +110,32 @@ var chainRegistry = []ChainInfo{
 		// "arbitrum" answered 404 while the other seven answered 200.
 		GMGNSlug: "", OKXSlug: "arbitrum-one",
 		RPCEnv: "RPC_ARBITRUM", DefaultRPC: "https://arbitrum-one-rpc.publicnode.com",
-		Aliases: []string{"arb", "arbitrum"},
+		MaxLogAddresses: 9,
+		Aliases:         []string{"arb", "arbitrum"},
 	},
 	{
 		Chain: ChainAvalanche, EVM: true, ChainID: 43114,
 		DexScreenerID: "avalanche", GeckoTerminalID: "avax",
 		GMGNSlug: "", OKXSlug: "avalanche",
 		RPCEnv: "RPC_AVALANCHE", DefaultRPC: "https://avalanche-c-chain-rpc.publicnode.com",
-		Aliases: []string{"avax", "avalanche"},
+		MaxLogAddresses: 9,
+		Aliases:         []string{"avax", "avalanche"},
 	},
 	{
 		Chain: ChainPolygon, EVM: true, ChainID: 137,
 		DexScreenerID: "polygon", GeckoTerminalID: "polygon_pos",
 		GMGNSlug: "", OKXSlug: "polygon",
 		RPCEnv: "RPC_POLYGON", DefaultRPC: "https://polygon-bor-rpc.publicnode.com",
-		Aliases: []string{"polygon", "matic", "pol"},
+		MaxLogAddresses: 9,
+		Aliases:         []string{"polygon", "matic", "pol"},
 	},
 	{
 		Chain: ChainOptimism, EVM: true, ChainID: 10,
 		DexScreenerID: "optimism", GeckoTerminalID: "optimism",
 		GMGNSlug: "", OKXSlug: "optimism",
 		RPCEnv: "RPC_OPTIMISM", DefaultRPC: "https://optimism-rpc.publicnode.com",
-		Aliases: []string{"op", "optimism"},
+		MaxLogAddresses: 9,
+		Aliases:         []string{"op", "optimism"},
 	},
 }
 

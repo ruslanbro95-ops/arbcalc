@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ruslanbro95-ops/arbcalc/dexvol/internal/domain"
@@ -90,6 +91,21 @@ type Source struct {
 	// address — Uniswap V4 pool ids, mostly. They are a known coverage gap,
 	// kept so the gap can be reported instead of vanishing.
 	skipped []domain.Pool
+	// drops counts decoded logs that never became a trade, by reason.
+	//
+	// A coverage number cannot tell "the pipeline saw nothing" from "the
+	// pipeline saw it and threw it away", and those need opposite responses.
+	// The spec asks the coverage report to account for missing volume rather
+	// than let it vanish, so every silent `return false` in decode is counted
+	// here and printed by cmd/coverage.
+	drops struct {
+		unsupportedPool atomic.Int64
+		undecodable     atomic.Int64
+		noBlockTime     atomic.Int64
+		otherToken      atomic.Int64
+		zeroAmount      atomic.Int64
+		unpriced        atomic.Int64
+	}
 }
 
 func NewSource(chain domain.Chain, rpc *RPC, prices PriceLookup, opts Options, log *slog.Logger) *Source {
@@ -273,6 +289,7 @@ func (s *Source) Poll(ctx context.Context, out chan<- domain.Trade) error {
 			s.setHealthy(false)
 			return fmt.Errorf("getLogs %d-%d: %w", from, to, err)
 		}
+		s.log.Debug("read blocks", "from", from, "to", to, "pools", len(addresses), "logs", len(logs))
 		if err := s.emit(ctx, logs, out); err != nil {
 			s.setHealthy(false)
 			return err
@@ -453,6 +470,7 @@ func (s *Source) ensureMeta(ctx context.Context, logs []Log) error {
 // decode turns one log into a normalized trade.
 func (s *Source) decode(l Log, times map[uint64]time.Time) (domain.Trade, bool) {
 	if len(l.Topics) == 0 {
+		s.drops.undecodable.Add(1)
 		return domain.Trade{}, false
 	}
 
@@ -461,20 +479,24 @@ func (s *Source) decode(l Log, times map[uint64]time.Time) (domain.Trade, bool) 
 	pool := s.pools[strings.ToLower(l.Address)]
 	s.mu.RUnlock()
 	if !hasMeta || !meta.supported {
+		s.drops.unsupportedPool.Add(1)
 		return domain.Trade{}, false
 	}
 
 	data, err := evm.DecodeHexData(l.Data)
 	if err != nil {
+		s.drops.undecodable.Add(1)
 		return domain.Trade{}, false
 	}
 	amounts, known, err := evm.DecodeSwap(l.Topics[0], data)
 	if err != nil || !known {
+		s.drops.undecodable.Add(1)
 		return domain.Trade{}, false
 	}
 
 	blockNum, err := l.BlockNumberValue()
 	if err != nil {
+		s.drops.undecodable.Add(1)
 		return domain.Trade{}, false
 	}
 	ts, ok := times[blockNum]
@@ -482,10 +504,12 @@ func (s *Source) decode(l Log, times map[uint64]time.Time) (domain.Trade, bool) 
 		// Without a block timestamp the trade cannot be placed in a minute.
 		// Dropping it is the honest outcome; guessing "now" would file an old
 		// trade into the current minute and fabricate a spike.
+		s.drops.noBlockTime.Add(1)
 		return domain.Trade{}, false
 	}
 	logIndex, err := l.LogIndexValue()
 	if err != nil {
+		s.drops.undecodable.Add(1)
 		return domain.Trade{}, false
 	}
 
@@ -512,9 +536,11 @@ func (s *Source) decode(l Log, times map[uint64]time.Time) (domain.Trade, bool) 
 		otherAddr, otherAmt, otherDec = meta.token0, amounts.Amount0, meta.dec0
 	default:
 		// The pool is watched for a different token in the list.
+		s.drops.otherToken.Add(1)
 		return domain.Trade{}, false
 	}
 	if amount == nil || amount.Sign() == 0 {
+		s.drops.zeroAmount.Add(1)
 		return domain.Trade{}, false
 	}
 
@@ -529,6 +555,7 @@ func (s *Source) decode(l Log, times map[uint64]time.Time) (domain.Trade, bool) 
 	if usd <= 0 {
 		// No price route: counting the trade at zero would understate the
 		// minute, so it is skipped and shows up as reduced coverage instead.
+		s.drops.unpriced.Add(1)
 		return domain.Trade{}, false
 	}
 
@@ -615,4 +642,53 @@ func decimalsFromReturn(hexStr string) int {
 		return 18
 	}
 	return int(v.Int64())
+}
+
+// Drops is a snapshot of the decode-stage losses, by reason.
+type Drops struct {
+	// UnsupportedPool is a pool whose token0()/token1() could not be read.
+	UnsupportedPool int64
+	// Undecodable is a log whose Swap layout this decoder does not know —
+	// Uniswap V4 among them.
+	Undecodable int64
+	// NoBlockTime is a log whose block timestamp did not resolve, so it could
+	// not be placed in a minute.
+	NoBlockTime int64
+	// OtherToken is a swap in a watched pool that moved a token we do not
+	// track. Not a loss: it is the pool's other side.
+	OtherToken int64
+	// ZeroAmount is a swap that moved none of the tracked token.
+	ZeroAmount int64
+	// Unpriced is a swap with no route to a USD value. This is the one that
+	// costs real coverage.
+	Unpriced int64
+}
+
+// Drops reports what decode discarded and why.
+func (s *Source) Drops() Drops {
+	return Drops{
+		UnsupportedPool: s.drops.unsupportedPool.Load(),
+		Undecodable:     s.drops.undecodable.Load(),
+		NoBlockTime:     s.drops.noBlockTime.Load(),
+		OtherToken:      s.drops.otherToken.Load(),
+		ZeroAmount:      s.drops.zeroAmount.Load(),
+		Unpriced:        s.drops.unpriced.Load(),
+	}
+}
+
+// AddressCap picks the eth_getLogs address-filter size for one chain: the
+// override when the operator set one, otherwise the limit the chain's endpoint
+// is known to have, otherwise no cap.
+//
+// It lives here so cmd/monitor and cmd/coverage cannot drift apart on it —
+// they did once already, on the seal deadline, and it cost a measurement that
+// read $0 against a chain that was trading.
+func AddressCap(chain domain.Chain, override int) int {
+	if override > 0 {
+		return override
+	}
+	if info, ok := domain.Info(chain); ok {
+		return info.MaxLogAddresses
+	}
+	return 0
 }

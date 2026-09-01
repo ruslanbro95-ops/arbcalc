@@ -31,6 +31,19 @@ type Static struct {
 	// SealDelay is how long after a minute ends before it is sealed. It buys
 	// slow sources time to deliver late trades; too short and real trades get
 	// dropped as TooLate, too long and alerts lag.
+	//
+	// It has a floor, and the floor is arithmetic rather than taste:
+	//
+	//	SealDelay >= Confirmations x block time + PollInterval
+	//
+	// A swap is invisible until Confirmations blocks have been mined on top of
+	// it, and then waits up to one poll to be read. On ethereum that is
+	// 2 x 12s + 12s = 36 seconds, so the old 20s default sealed every minute
+	// before its last third could arrive and threw those trades away. bsc
+	// (0.75s blocks) and base (2s) needed about 14 and 16 seconds, which is
+	// why the shortfall showed up as a partial loss there and a total one on
+	// ethereum. 45s clears the slowest chain here with room to spare, at the
+	// cost of 25 more seconds before an alert.
 	SealDelay time.Duration
 	// PoolRefresh is how often pool discovery re-runs, so a token appearing on
 	// a new DEX is picked up instead of being missed forever.
@@ -39,10 +52,10 @@ type Static struct {
 	RawTradeRetention time.Duration
 	// RPCEndpoints maps a chain to its JSON-RPC URL.
 	RPCEndpoints map[domain.Chain]string
-	// EVMMaxAddressesPerCall caps how many pool addresses go into one
-	// eth_getLogs filter. The public defaults reject ten or more outright, so
-	// this is not a tuning knob but the difference between a chain having data
-	// and having none. Raise it when RPC_* points at your own node.
+	// EVMMaxAddressesPerCall overrides, for every chain, how many pool
+	// addresses may go into one eth_getLogs filter. Zero means each chain uses
+	// the limit its endpoint is known to have — see MaxLogAddresses in the
+	// chain registry. Set it once RPC_* points at your own node.
 	EVMMaxAddressesPerCall int
 	// LogLevel is "debug", "info", "warn" or "error".
 	LogLevel string
@@ -100,10 +113,10 @@ func LoadStatic() (Static, error) {
 		StatePath:              envStr("STATE_PATH", "state.json"),
 		DBPath:                 envStr("DB_PATH", "dexvol.db"),
 		PollInterval:           envDur("POLL_INTERVAL", 12*time.Second),
-		SealDelay:              envDur("SEAL_DELAY", 20*time.Second),
+		SealDelay:              envDur("SEAL_DELAY", 45*time.Second),
 		PoolRefresh:            envDur("POOL_REFRESH", 5*time.Minute),
 		RawTradeRetention:      envDur("RAW_TRADE_RETENTION", 48*time.Hour),
-		EVMMaxAddressesPerCall: envInt("EVM_MAX_ADDRESSES_PER_CALL", 9),
+		EVMMaxAddressesPerCall: envInt("EVM_MAX_ADDRESSES_PER_CALL", 0),
 		LogLevel:               envStr("LOG_LEVEL", "info"),
 		RPCEndpoints:           map[domain.Chain]string{},
 	}
