@@ -73,11 +73,12 @@ var chainRegistry = []ChainInfo{
 	},
 	{
 		// Robinhood Chain: an Arbitrum Orbit L2, mainnet since 2026-07-01.
-		// GeckoTerminal's network id for it could not be confirmed, so
-		// discovery there runs on DEX Screener alone and backfill is
-		// unavailable; GMGN does not list it, hence no button.
+		// GeckoTerminal's id for it is "robinhood", confirmed against the
+		// live /networks list and against its pools and minute-OHLCV
+		// endpoints, so the chain has both discovery opinions and history
+		// backfill. GMGN does not list it, hence no button.
 		Chain: ChainRobinhood, EVM: true, ChainID: 4663,
-		DexScreenerID: "robinhood", GeckoTerminalID: "",
+		DexScreenerID: "robinhood", GeckoTerminalID: "robinhood",
 		GMGNSlug: "", OKXSlug: "",
 		RPCEnv: "RPC_ROBINHOOD", DefaultRPC: "https://rpc.mainnet.chain.robinhood.com",
 		Aliases: []string{"rh", "robinhood"},

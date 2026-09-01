@@ -11,6 +11,11 @@ import (
 	"github.com/ruslanbro95-ops/arbcalc/dexvol/internal/domain"
 )
 
+// sui stands in for a network the registry does not carry: GeckoTerminal itself
+// covers it, but this project has no adapter for a non-EVM chain of that shape,
+// so the client must refuse it instead of guessing an id.
+const sui = domain.Chain("sui")
+
 const poolsBody = `{"data":[
  {"id":"base_0xPOOL1","attributes":{"address":"0xPOOL1","reserve_in_usd":"500000",
    "volume_usd":{"h1":"100","h24":"1000"}},
@@ -62,14 +67,14 @@ func TestVolumeCountsOnlyBaseSidePools(t *testing.T) {
 	}
 }
 
-func TestRobinhoodIsExplicitlyUnsupported(t *testing.T) {
+func TestChainOutsideTheRegistryIsExplicitlyUnsupported(t *testing.T) {
 	// Guessing a network id would turn "unsupported" into a silent 404 that
 	// reads like "this token has no pools".
 	c := stub(t, poolsBody)
-	if c.Supports(domain.ChainRobinhood) {
-		t.Fatal("Robinhood Chain has no confirmed GeckoTerminal network id")
+	if c.Supports(sui) {
+		t.Fatal("Sui is not in the chain registry, so it has no network id here")
 	}
-	if _, err := c.DiscoverPools(t.Context(), domain.Token{Chain: domain.ChainRobinhood, Address: "0xT"}); err == nil {
+	if _, err := c.DiscoverPools(t.Context(), domain.Token{Chain: sui, Address: "0xT"}); err == nil {
 		t.Fatal("expected an explicit error")
 	}
 }
@@ -180,7 +185,7 @@ func TestOHLCVMinuteRequestsUSDAndPagesBackwards(t *testing.T) {
 
 func TestOHLCVUnsupportedChainIsAnError(t *testing.T) {
 	c := stub(t, ohlcvBody)
-	_, err := c.OHLCVMinute(t.Context(), domain.Pool{Chain: domain.ChainRobinhood, Address: "0xP"}, 0, time.Now())
+	_, err := c.OHLCVMinute(t.Context(), domain.Pool{Chain: sui, Address: "0xP"}, 0, time.Now())
 	if err == nil {
 		t.Fatal("a chain with no network id must fail loudly, not return an empty history")
 	}

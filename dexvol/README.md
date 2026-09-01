@@ -56,7 +56,7 @@ DexScreener / GeckoTerminal / RPC оттуда невозможны. Поэто�
 |---|---|---|---|
 | ethereum, bsc, base | `eth_getLogs` | 2 провайдера | ✅ |
 | solana | signatures + token balances | 2 провайдера | ✅ |
-| robinhood (chain id 4663) | `eth_getLogs` | 1 провайдер | ❌ |
+| robinhood (chain id 4663) | `eth_getLogs` | 2 провайдера | ✅ |
 | arbitrum, avalanche, polygon, optimism | `eth_getLogs` | 2 провайдера | ✅ |
 
 Первые пять — по ТЗ. Остальные — расширение из п.26: они EVM, поэтому работают
@@ -379,10 +379,10 @@ Cooldown 5 минут. Внутри него повтор того же само
 `MISSING` вместо тихо занижённого объёма.
 
 **Robinhood Chain.** Сеть EVM-совместимая (Arbitrum Orbit, chain ID 4663,
-mainnet с 01.07.2026), поэтому работает тем же EVM-адаптером. Но
-GeckoTerminal-идентификатор сети подтвердить не удалось, а на нём висит и второе
-мнение discovery, и бэкфилл истории. Итог: там один провайдер discovery
-(DexScreener) и медианы копятся только вживую — сутки до рабочей медианы 24h.
+mainnet с 01.07.2026), поэтому работает тем же EVM-адаптером. Её
+GeckoTerminal-идентификатор — `robinhood`, подтверждён живыми запросами
+(`./coverage -list-networks robin`, плюс пулы токена и минутный OHLCV), так что
+здесь тоже два провайдера discovery и рабочий бэкфилл истории за 24ч.
 Кнопки GMGN и OKX для этой сети не выводятся: GMGN её не листит.
 
 **Ссылка OKX.** Шаблон `https://web3.okx.com/token/{chain}/{address}` не удалось

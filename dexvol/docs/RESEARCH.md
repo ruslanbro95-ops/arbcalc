@@ -47,7 +47,7 @@ Anthropic). Прямые запросы к `api.dexscreener.com`, `api.geckoterm
 | ethereum | EVM | 1 | `ethereum` | `eth` | `eth_getLogs` | ✅ |
 | bsc | EVM | 56 | `bsc` | `bsc` | `eth_getLogs` | ✅ |
 | base | EVM | 8453 | `base` | `base` | `eth_getLogs` | ✅ |
-| robinhood | EVM | 4663 | `robinhood` | — | `eth_getLogs` | ❌ id не подтверждён |
+| robinhood | EVM | 4663 | `robinhood` | `robinhood` | `eth_getLogs` | ✅ |
 | solana | не-EVM | — | `solana` | `solana` | signatures + token balances | ✅ |
 | arbitrum | EVM | 42161 | `arbitrum` | `arbitrum` | `eth_getLogs` | ✅ |
 | avalanche | EVM | 43114 | `avalanche` | `avax` | `eth_getLogs` | ✅ |
@@ -70,7 +70,7 @@ Anthropic). Прямые запросы к `api.dexscreener.com`, `api.geckoterm
 | Источник | ETH | BNB | Solana | Base | Robinhood (4663) | WebSocket | Ключ | Бесплатно | Лимит free | Даёт сделки? |
 |---|---|---|---|---|---|---|---|---|---|---|
 | **DexScreener API** | ✅ | ✅ | ✅ | ✅ | ✅ (chainId `robinhood`) | ❌ | не нужен | да | 300 req/min (pairs/tokens), 60 req/min (profiles/boosts) | ❌ только агрегаты `m5/h1/h6/h24` |
-| **GeckoTerminal API** | ✅ (`eth`) | ✅ (`bsc`) | ✅ (`solana`) | ✅ (`base`) | ⚠️ индексируется, id уточнить | ❌ | не нужен | да | 30 calls/min | ✅ последние **300** сделок за 24ч, **на пул** |
+| **GeckoTerminal API** | ✅ (`eth`) | ✅ (`bsc`) | ✅ (`solana`) | ✅ (`base`) | ✅ (`robinhood`) | ❌ | не нужен | да | 30 calls/min | ✅ последние **300** сделок за 24ч, **на пул** |
 | **EVM RPC (`eth_getLogs`)** | ✅ | ✅ | ❌ | ✅ | ✅ (`rpc.mainnet.chain.robinhood.com`) | ✅ (`eth_subscribe`) | зависит от провайдера | да (public RPC / free tier) | зависит от провайдера | ✅ **все** сделки, точный timestamp по блоку |
 | **Solana RPC (`logsSubscribe`)** | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | зависит | да | зависит | ⚠️ даёт сигнатуры; суммы — доп. `getTransaction` |
 | **Bitquery** | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ (платно) | да | формально | **1 000 points/мес, 10 строк в ответе, 10 req/min**; live-стриминг с Pro $99 | ✅ но лимиты убивают |
@@ -266,13 +266,15 @@ Robinhood Chain укладывается сюда же: это EVM L2 на Arbit
 
 ### Где бэкфилл недоступен
 
-Robinhood Chain: id сети в GeckoTerminal не подтверждён → истории нет,
-медианы там копятся только вживую. `/chains` показывает это заранее.
+Таких сетей сейчас нет. Robinhood Chain была единственной под вопросом, но её
+id (`robinhood`) подтверждён живыми запросами — и в списке `/networks`, и на
+эндпоинтах пулов и минутного OHLCV. Если сеть когда-нибудь появится без
+GeckoTerminal-id, `/chains` предупредит об этом заранее.
 
 ## 3.9 Проверка идентификаторов сетей
 
 Id сетей GeckoTerminal (`eth`, `bsc`, `polygon_pos`, `avax`, `arbitrum`,
-`base`, `solana`, `optimism`) захардкожены в реестре
+`base`, `solana`, `optimism`, `robinhood`) захардкожены в реестре
 `internal/domain/chains.go`. Неверный id — самый тихий из возможных отказов:
 запросы уходят в 404, адаптер рапортует «пулов нет», сеть молча теряет второе
 мнение discovery и бэкфилл, и при этом ничего не выглядит сломанным.

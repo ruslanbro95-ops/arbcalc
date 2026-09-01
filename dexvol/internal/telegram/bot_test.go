@@ -102,15 +102,23 @@ func TestChainsCommandListsRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ethereum", "solana", "arbitrum", "polygon"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("/chains output missing %q:\n%s", want, out)
+	for _, info := range domain.Chains() {
+		if !strings.Contains(out, string(info.Chain)) {
+			t.Errorf("/chains output missing %q:\n%s", info.Chain, out)
 		}
 	}
-	// Robinhood has no GeckoTerminal id, so the owner should be told what that
-	// costs before adding a token there.
-	if !strings.Contains(out, "no history backfill") {
-		t.Errorf("/chains should flag the single-provider network:\n%s", out)
+	// The warning is what tells the owner, before adding a token, that a
+	// network gets one discovery opinion and no history to start from. It has
+	// to appear for exactly the networks GeckoTerminal does not cover — which
+	// is none of them since Robinhood Chain's id was confirmed.
+	want := 0
+	for _, info := range domain.Chains() {
+		if info.GeckoTerminalID == "" {
+			want++
+		}
+	}
+	if got := strings.Count(out, "no history backfill"); got != want {
+		t.Errorf("/chains flagged %d networks, want %d:\n%s", got, want, out)
 	}
 }
 

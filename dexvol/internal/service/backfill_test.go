@@ -219,8 +219,10 @@ func TestBackfillNeverOverwritesLiveMinutes(t *testing.T) {
 }
 
 func TestBackfillSkipsChainWithoutHistoryProvider(t *testing.T) {
-	// Robinhood Chain has no confirmed GeckoTerminal id, so history is simply
-	// unavailable there; the service must say so rather than write zeros.
+	// Every registry chain has a GeckoTerminal id today, but the provider can
+	// still refuse a chain — an id retired upstream, or a chain added here
+	// before its history exists. Then the service must say so rather than
+	// write zeros.
 	h := &stubHistory{unsupported: true}
 	bf, _, _ := newBackfiller(t, h)
 
