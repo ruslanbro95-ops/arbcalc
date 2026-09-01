@@ -124,6 +124,17 @@ type Log struct {
 	TxHash      string   `json:"transactionHash"`
 	LogIndex    string   `json:"logIndex"`
 	Removed     bool     `json:"removed"`
+	// BlockTimestamp is the block's time, returned inline by Geth-derived
+	// nodes since 2023 and by every endpoint this project ships a default
+	// for except one.
+	//
+	// It is worth a field of its own because it removes an entire class of
+	// request. Without it each batch of logs needs an eth_getBlockByNumber
+	// per distinct block, and on Robinhood Chain — 0.12-second blocks, so a
+	// twelve-second poll spans a hundred of them — that was hundreds of extra
+	// sub-calls a minute, which is what made its own node rate limit us into
+	// one usable minute out of fifty-nine.
+	BlockTimestamp string `json:"blockTimestamp"`
 }
 
 // BlockNumberValue parses the hex block number.
@@ -261,4 +272,17 @@ func (r *RPC) ChainID(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	return parseHexUint(hexNum)
+}
+
+// BlockTimestampValue parses the inline block time, reporting false when the
+// node did not send one so the caller knows to ask for it separately.
+func (l Log) BlockTimestampValue() (time.Time, bool) {
+	if l.BlockTimestamp == "" {
+		return time.Time{}, false
+	}
+	secs, err := parseHexUint(l.BlockTimestamp)
+	if err != nil || secs == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(secs), 0).UTC(), true
 }

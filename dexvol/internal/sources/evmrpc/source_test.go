@@ -26,15 +26,16 @@ const (
 
 // node is a scriptable JSON-RPC stub.
 type node struct {
-	mu        sync.Mutex
-	head      uint64
-	logs      []Log
-	logsErr   bool
-	getLogsN  int
-	lastFrom  string
-	lastTo    string
-	lastAddrs []string
-	blockTime int64
+	mu             sync.Mutex
+	head           uint64
+	logs           []Log
+	logsErr        bool
+	getLogsN       int
+	lastFrom       string
+	lastTo         string
+	lastAddrs      []string
+	blockTimeCalls int
+	blockTime      int64
 }
 
 func (n *node) handle(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +106,7 @@ func (n *node) batchResult(method string, params []any) any {
 
 	switch method {
 	case "eth_getBlockByNumber":
+		n.blockTimeCalls++
 		return map[string]any{"timestamp": hexUint(uint64(n.blockTime))}
 	case "eth_call":
 		call, _ := params[0].(map[string]any)
@@ -543,5 +545,61 @@ func TestCounterpartySideWinsEvenWhenTheTokenHasItsOwnPrice(t *testing.T) {
 	if got[0].USDVolume != 4000 {
 		t.Fatalf("usd = %v, want 4000 from the WETH leg, not 4500 from the token's own price",
 			got[0].USDVolume)
+	}
+}
+
+func TestInlineBlockTimestampSkipsTheBlockTimeRequests(t *testing.T) {
+	// Geth-derived nodes put blockTimestamp in the log itself. Using it
+	// removes an eth_getBlockByNumber per distinct block, which on a chain
+	// with 0.12-second blocks is a hundred sub-calls per poll — the load that
+	// rate limited Robinhood Chain down to one usable minute in fifty-nine.
+	ts := time.Date(2026, 9, 1, 12, 30, 14, 0, time.UTC)
+	n := &node{head: 1000, blockTime: ts.Unix()}
+	s := newSource(t, n, fixedPrices{tokenAddr: 2})
+	drain(t, s) // seed
+
+	e18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	log := v2SwapLog(1000, 0, "0xF01", e18, new(big.Int).Mul(big.NewInt(500), e18))
+	log.BlockTimestamp = hexUint(uint64(ts.Unix()))
+
+	n.mu.Lock()
+	n.head = 1010
+	n.logs = []Log{log}
+	n.blockTimeCalls = 0
+	n.mu.Unlock()
+
+	got := drain(t, s)
+	if len(got) != 1 {
+		t.Fatalf("got %d trades, want 1", len(got))
+	}
+	if !got[0].Timestamp.Equal(ts) {
+		t.Fatalf("timestamp = %s, want %s from the log itself", got[0].Timestamp, ts)
+	}
+	if n.blockTimeCalls != 0 {
+		t.Fatalf("asked for %d block times; the log already carried one", n.blockTimeCalls)
+	}
+}
+
+func TestMissingInlineTimestampStillFallsBackToTheNode(t *testing.T) {
+	// Not every endpoint sends it, and a chain without it must keep working
+	// rather than silently drop every trade for want of a minute to file it in.
+	ts := time.Date(2026, 9, 1, 12, 30, 14, 0, time.UTC)
+	n := &node{head: 1000, blockTime: ts.Unix()}
+	s := newSource(t, n, fixedPrices{tokenAddr: 2})
+	drain(t, s)
+
+	e18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	n.mu.Lock()
+	n.head = 1010
+	n.logs = []Log{v2SwapLog(1000, 0, "0xF02", e18, new(big.Int).Mul(big.NewInt(500), e18))}
+	n.blockTimeCalls = 0
+	n.mu.Unlock()
+
+	got := drain(t, s)
+	if len(got) != 1 {
+		t.Fatalf("got %d trades, want 1", len(got))
+	}
+	if n.blockTimeCalls == 0 {
+		t.Fatal("with no inline timestamp the node must be asked")
 	}
 }

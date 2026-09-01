@@ -323,22 +323,41 @@ func (s *Source) emit(ctx context.Context, logs []Log, out chan<- domain.Trade) 
 		return nil
 	}
 
-	// Resolve every block timestamp the batch needs in a single call.
-	blockSet := map[uint64]bool{}
+	// Block times come from the logs themselves wherever the node sends them,
+	// and only the leftovers are fetched. On the endpoints this project
+	// defaults to that is all of them, which turns a per-block request into
+	// nothing at all — the difference between Robinhood Chain being usable
+	// and rate limiting us into silence.
+	times := map[uint64]time.Time{}
+	var missing []uint64
+	seen := map[uint64]bool{}
 	for _, l := range logs {
-		if n, err := l.BlockNumberValue(); err == nil {
-			blockSet[n] = true
+		n, err := l.BlockNumberValue()
+		if err != nil {
+			continue
+		}
+		if _, have := times[n]; have {
+			continue
+		}
+		if ts, ok := l.BlockTimestampValue(); ok {
+			times[n] = ts
+			continue
+		}
+		if !seen[n] {
+			seen[n] = true
+			missing = append(missing, n)
 		}
 	}
-	blocks := make([]uint64, 0, len(blockSet))
-	for b := range blockSet {
-		blocks = append(blocks, b)
-	}
-	sort.Slice(blocks, func(i, j int) bool { return blocks[i] < blocks[j] })
 
-	times, err := s.rpc.BlockTimes(ctx, blocks)
-	if err != nil {
-		return fmt.Errorf("block times: %w", err)
+	if len(missing) > 0 {
+		sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
+		fetched, err := s.rpc.BlockTimes(ctx, missing)
+		if err != nil {
+			return fmt.Errorf("block times: %w", err)
+		}
+		for n, ts := range fetched {
+			times[n] = ts
+		}
 	}
 
 	if err := s.ensureMeta(ctx, logs); err != nil {

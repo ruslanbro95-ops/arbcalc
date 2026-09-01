@@ -73,10 +73,17 @@ var chainRegistry = []ChainInfo{
 		Aliases:         []string{"bsc", "bnb", "bnbchain"},
 	},
 	{
+		// Solana's public endpoint is the one the docs name and the one that
+		// cannot do this job: measured, api.mainnet-beta.solana.com refused 2
+		// of 12 signature requests in a burst and then every one of the next
+		// 12, and a coverage run over an hour got 0 usable minutes out of 59.
+		// solana-rpc.publicnode.com answered 60 of 60 with no key, so it is
+		// the default. Both are free and neither needs registration; the
+		// difference is entirely in what they will actually serve.
 		Chain: ChainSolana, EVM: false,
 		DexScreenerID: "solana", GeckoTerminalID: "solana",
 		GMGNSlug: "sol", OKXSlug: "solana",
-		RPCEnv: "RPC_SOLANA", DefaultRPC: "https://api.mainnet-beta.solana.com",
+		RPCEnv: "RPC_SOLANA", DefaultRPC: "https://solana-rpc.publicnode.com",
 		Aliases: []string{"sol", "solana"},
 	},
 	{

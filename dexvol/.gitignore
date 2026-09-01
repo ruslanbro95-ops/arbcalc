@@ -19,3 +19,5 @@ coverage-run.log
 coverage-check.log
 eth-check.md
 eth-check.log
+monitor.out.log
+monitor.err.log
