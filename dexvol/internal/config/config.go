@@ -1,0 +1,208 @@
+// Package config separates the two kinds of settings this service has:
+// static ones that come from the environment and only change on restart, and
+// runtime ones the owner edits from Telegram while the service keeps running.
+package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ruslanbro95-ops/arbcalc/dexvol/internal/domain"
+)
+
+// Static is read once at boot. Secrets live here and never in the state file.
+type Static struct {
+	// TelegramToken is the bot token from @BotFather.
+	TelegramToken string
+	// OwnerID is the only Telegram user allowed to talk to the bot. Every
+	// other chat is refused, because the bot is also the control panel.
+	OwnerID int64
+	// StatePath is where runtime settings and the token list are persisted.
+	StatePath string
+	// DBPath is the SQLite file holding minute volumes and raw trades.
+	DBPath string
+	// PollInterval is how often sources are asked for new trades.
+	PollInterval time.Duration
+	// SealDelay is how long after a minute ends before it is sealed. It buys
+	// slow sources time to deliver late trades; too short and real trades get
+	// dropped as TooLate, too long and alerts lag.
+	SealDelay time.Duration
+	// PoolRefresh is how often pool discovery re-runs, so a token appearing on
+	// a new DEX is picked up instead of being missed forever.
+	PoolRefresh time.Duration
+	// RawTradeRetention bounds how long raw trades are kept for debugging.
+	RawTradeRetention time.Duration
+	// RPCEndpoints maps a chain to its JSON-RPC URL.
+	RPCEndpoints map[domain.Chain]string
+	// LogLevel is "debug", "info", "warn" or "error".
+	LogLevel string
+}
+
+// Runtime is everything the owner can change from Telegram without a restart.
+type Runtime struct {
+	// ThresholdPct is the percentage a minute must exceed a baseline by.
+	ThresholdPct float64 `json:"threshold_pct"`
+	// CooldownMinutes suppresses repeat alerts for one token.
+	CooldownMinutes int `json:"cooldown_minutes"`
+	// EscalationFactor lets a materially stronger anomaly break the cooldown:
+	// a new spike must be this many times the last alerted change to get
+	// through. Without it a $10k anomaly would mask a $10M one for the whole
+	// cooldown window.
+	EscalationFactor float64 `json:"escalation_factor"`
+	// Windows enables or disables each baseline.
+	Windows map[int]bool `json:"windows"`
+	// Monitoring is the global on/off switch.
+	Monitoring bool `json:"monitoring"`
+	// Tokens is the watch list.
+	Tokens []domain.Token `json:"tokens"`
+}
+
+// DefaultRuntime matches the values the spec calls standard.
+func DefaultRuntime() Runtime {
+	return Runtime{
+		ThresholdPct:     20,
+		CooldownMinutes:  5,
+		EscalationFactor: 2.0,
+		Windows: map[int]bool{
+			10:      true,
+			30:      true,
+			60:      true,
+			24 * 60: true,
+		},
+		Monitoring: true,
+		Tokens:     nil,
+	}
+}
+
+// LoadStatic reads the environment. It fails fast on a missing bot token or
+// owner id: without an owner the bot would accept commands from anyone, and
+// this bot is the control panel for the whole service.
+func LoadStatic() (Static, error) {
+	s := Static{
+		TelegramToken:     os.Getenv("TELEGRAM_BOT_TOKEN"),
+		StatePath:         envStr("STATE_PATH", "state.json"),
+		DBPath:            envStr("DB_PATH", "dexvol.db"),
+		PollInterval:      envDur("POLL_INTERVAL", 12*time.Second),
+		SealDelay:         envDur("SEAL_DELAY", 20*time.Second),
+		PoolRefresh:       envDur("POOL_REFRESH", 5*time.Minute),
+		RawTradeRetention: envDur("RAW_TRADE_RETENTION", 48*time.Hour),
+		LogLevel:          envStr("LOG_LEVEL", "info"),
+		RPCEndpoints:      map[domain.Chain]string{},
+	}
+
+	if s.TelegramToken == "" {
+		return s, fmt.Errorf("TELEGRAM_BOT_TOKEN is not set")
+	}
+	raw := os.Getenv("TELEGRAM_OWNER_ID")
+	if raw == "" {
+		return s, fmt.Errorf("TELEGRAM_OWNER_ID is not set; the bot refuses to run without a single authorized owner")
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return s, fmt.Errorf("TELEGRAM_OWNER_ID %q is not a number: %w", raw, err)
+	}
+	s.OwnerID = id
+
+	// Public defaults let the service start with no accounts anywhere; any of
+	// them can be swapped for a private endpoint with a higher rate limit.
+	defaults := map[domain.Chain]struct{ env, url string }{
+		domain.ChainEthereum:  {"RPC_ETHEREUM", "https://ethereum-rpc.publicnode.com"},
+		domain.ChainBNB:       {"RPC_BSC", "https://bsc-rpc.publicnode.com"},
+		domain.ChainBase:      {"RPC_BASE", "https://base-rpc.publicnode.com"},
+		domain.ChainRobinhood: {"RPC_ROBINHOOD", "https://rpc.mainnet.chain.robinhood.com"},
+		domain.ChainSolana:    {"RPC_SOLANA", "https://api.mainnet-beta.solana.com"},
+	}
+	for chain, d := range defaults {
+		s.RPCEndpoints[chain] = envStr(d.env, d.url)
+	}
+	return s, nil
+}
+
+// Store holds the runtime settings and persists every change, so a restart
+// keeps the owner's threshold, cooldown and watch list.
+type Store struct {
+	path string
+	rt   Runtime
+}
+
+func NewStore(path string) *Store {
+	return &Store{path: path, rt: DefaultRuntime()}
+}
+
+// Load reads the state file. A missing file is not an error — it just means a
+// first run, and the defaults stand.
+func (s *Store) Load() error {
+	b, err := os.ReadFile(s.path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rt := DefaultRuntime()
+	if err := json.Unmarshal(b, &rt); err != nil {
+		return fmt.Errorf("parse %s: %w", s.path, err)
+	}
+	if rt.Windows == nil {
+		rt.Windows = DefaultRuntime().Windows
+	}
+	if rt.EscalationFactor <= 1 {
+		rt.EscalationFactor = DefaultRuntime().EscalationFactor
+	}
+	s.rt = rt
+	return nil
+}
+
+// Save writes through a temporary file so a crash mid-write cannot leave the
+// owner's settings truncated.
+func (s *Store) Save() error {
+	b, err := json.MarshalIndent(s.rt, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
+}
+
+// Get returns a copy; callers cannot mutate the store by holding the result.
+func (s *Store) Get() Runtime {
+	cp := s.rt
+	cp.Tokens = append([]domain.Token(nil), s.rt.Tokens...)
+	cp.Windows = make(map[int]bool, len(s.rt.Windows))
+	for k, v := range s.rt.Windows {
+		cp.Windows[k] = v
+	}
+	return cp
+}
+
+// Update applies fn to the settings and persists the result.
+func (s *Store) Update(fn func(*Runtime)) error {
+	fn(&s.rt)
+	return s.Save()
+}
+
+func envStr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envDur(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return def
+	}
+	return d
+}
