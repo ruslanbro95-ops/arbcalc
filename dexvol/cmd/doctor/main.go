@@ -227,7 +227,7 @@ func checkRPC(ctx context.Context, r *report) {
 		}
 
 		if info.Chain == domain.ChainSolana {
-			slot, err := solanarpc.NewRPC(url, 240).Slot(ctx)
+			slot, err := solanarpc.NewRPC(url, "", 240).Slot(ctx)
 			if err != nil {
 				r.fail(group, name, err.Error(), "set "+info.RPCEnv+" to a reachable endpoint")
 				continue

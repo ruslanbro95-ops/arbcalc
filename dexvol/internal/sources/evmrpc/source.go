@@ -349,6 +349,7 @@ func (s *Source) emit(ctx context.Context, logs []Log, out chan<- domain.Trade) 
 		}
 	}
 
+	s.log.Debug("block times", "logs", len(logs), "inline", len(times), "missing", len(missing))
 	if len(missing) > 0 {
 		sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
 		fetched, err := s.rpc.BlockTimes(ctx, missing)

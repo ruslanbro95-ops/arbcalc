@@ -120,7 +120,7 @@ func newSource(t *testing.T, n *node, prices PriceLookup, opts Options) *Source 
 	srv := httptest.NewServer(http.HandlerFunc(n.handle))
 	t.Cleanup(srv.Close)
 
-	s := NewSource(NewRPC(srv.URL, 100000), prices, opts, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := NewSource(NewRPC(srv.URL, "", 100000), prices, opts, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.SetPools([]domain.Pool{{Chain: domain.ChainSolana, Address: poolAddr, DEX: "raydium"}})
 	s.SetTokens([]domain.Token{{Chain: domain.ChainSolana, Address: mint, Symbol: "ABC"}})
 	return s
@@ -287,5 +287,54 @@ func TestUnpricedTokenIsSkipped(t *testing.T) {
 	s := newSource(t, n, fixedPrices{}, DefaultOptions())
 	if got := drain(t, s); len(got) != 0 {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestTransactionsGoToTheirOwnEndpoint(t *testing.T) {
+	// No free Solana node does both halves. The signature endpoint refuses a
+	// batch of more than one getTransaction; the batching endpoint rate limits
+	// signatures. Sending each method where it is served is the difference
+	// between this chain having data and having none.
+	var sigHits, txHits int
+	sigs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sigHits++
+		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":[]}`))
+	}))
+	t.Cleanup(sigs.Close)
+	txs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		txHits++
+		w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(txs.Close)
+
+	rpc := NewRPC(sigs.URL, txs.URL, 100000)
+
+	if _, err := rpc.Signatures(t.Context(), poolAddr, "", 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rpc.Transactions(t.Context(), []string{"sig1", "sig2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if sigHits != 1 || txHits != 1 {
+		t.Fatalf("signatures hit %d times, transactions %d; each must go to its own endpoint",
+			sigHits, txHits)
+	}
+}
+
+func TestOneEndpointStillWorksWhenNoSecondIsGiven(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	rpc := NewRPC(srv.URL, "", 100000)
+	if _, err := rpc.Signatures(t.Context(), poolAddr, "", 10); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 1 {
+		t.Fatalf("hits = %d, want the single endpoint to serve everything", hits)
 	}
 }

@@ -251,7 +251,7 @@ func buildSources(res service.DiscoveryResult, tokens []domain.Token, prices *se
 		}
 		var src service.TradeSource
 		if chain == domain.ChainSolana {
-			src = solanarpc.NewSource(solanarpc.NewRPC(url, 240), prices, solanarpc.DefaultOptions(), log)
+			src = solanarpc.NewSource(solanarpc.NewRPC(url, env("RPC_SOLANA_TX", "https://api.mainnet-beta.solana.com"), 240), prices, solanarpc.DefaultOptions(), log)
 		} else if chain.IsEVM() {
 			opts := evmrpc.DefaultOptions()
 			opts.MaxAddressesPerCall = evmrpc.AddressCap(chain, maxAddresses)

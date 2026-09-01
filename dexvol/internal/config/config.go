@@ -59,6 +59,13 @@ type Static struct {
 	RawTradeRetention time.Duration
 	// RPCEndpoints maps a chain to its JSON-RPC URL.
 	RPCEndpoints map[domain.Chain]string
+	// SolanaTxRPC serves getTransaction, separately from RPC_SOLANA.
+	//
+	// No free Solana endpoint does both halves: the one that answers every
+	// signature request refuses batched getTransaction, and the one that
+	// batches transactions rate limits signatures. Splitting the two methods
+	// is cheaper than giving up either.
+	SolanaTxRPC string
 	// EVMMaxAddressesPerCall overrides, for every chain, how many pool
 	// addresses may go into one eth_getLogs filter. Zero means each chain uses
 	// the limit its endpoint is known to have — see MaxLogAddresses in the
@@ -131,6 +138,7 @@ func LoadStatic() (Static, error) {
 		PoolRefresh:            envDur("POOL_REFRESH", 5*time.Minute),
 		RawTradeRetention:      envDur("RAW_TRADE_RETENTION", 48*time.Hour),
 		EVMMaxAddressesPerCall: envInt("EVM_MAX_ADDRESSES_PER_CALL", 0),
+		SolanaTxRPC:            envStr("RPC_SOLANA_TX", "https://api.mainnet-beta.solana.com"),
 		LogLevel:               envStr("LOG_LEVEL", "info"),
 		RPCEndpoints:           map[domain.Chain]string{},
 	}

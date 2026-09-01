@@ -55,10 +55,27 @@ func DefaultOptions() Options {
 type RPC struct {
 	http *sources.HTTP
 	url  string
+	// txURL serves getTransaction, and it is a separate endpoint because no
+	// free Solana node does both halves of this job.
+	//
+	// Measured: solana-rpc.publicnode.com answers 60 of 60 signature requests
+	// but refuses a batch holding more than one getTransaction.
+	// api.mainnet-beta.solana.com batches transactions happily but rate limits
+	// getSignaturesForAddress after about ten calls. Splitting the two methods
+	// across them is what the spec means by combining free sources rather than
+	// forcing one to do everything.
+	txURL string
 }
 
-func NewRPC(url string, perMinute int) *RPC {
-	return &RPC{http: sources.NewHTTP("solanarpc", perMinute, 30*time.Second), url: url}
+func NewRPC(url, txURL string, perMinute int) *RPC {
+	if txURL == "" {
+		txURL = url
+	}
+	return &RPC{
+		http:  sources.NewHTTP("solanarpc", perMinute, 30*time.Second),
+		url:   url,
+		txURL: txURL,
+	}
 }
 
 type rpcRequest struct {
@@ -165,7 +182,7 @@ func (r *RPC) Transactions(ctx context.Context, sigs []string) (map[string]*Tran
 	}
 
 	var resps []rpcResponse
-	if err := r.http.PostJSON(ctx, r.url, reqs, &resps); err != nil {
+	if err := r.http.PostJSON(ctx, r.txURL, reqs, &resps); err != nil {
 		return nil, err
 	}
 

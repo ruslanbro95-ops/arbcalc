@@ -117,7 +117,7 @@ func buildSources(static config.Static, prices *service.PriceCache, log *slog.Lo
 		}
 		if chain == domain.ChainSolana {
 			out[chain] = solanarpc.NewSource(
-				solanarpc.NewRPC(url, rpcBudget(chain)),
+				solanarpc.NewRPC(url, static.SolanaTxRPC, rpcBudget(chain)),
 				prices, solanarpc.DefaultOptions(), log)
 			continue
 		}
