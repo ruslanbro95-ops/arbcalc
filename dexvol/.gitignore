@@ -21,3 +21,6 @@ eth-check.md
 eth-check.log
 monitor.out.log
 monitor.err.log
+
+# runtime state: the watch list and settings the bot edits
+state.json
