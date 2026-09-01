@@ -14,4 +14,6 @@ dexvol.env
 
 # cmd/coverage writes its run here when you redirect it
 coverage-run.md
+coverage-check.md
 coverage-run.log
+coverage-check.log

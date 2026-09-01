@@ -313,8 +313,7 @@ func collect(
 	defer sealTicker.Stop()
 
 	lastSealed := start.Add(-time.Minute)
-	seal := func(now time.Time) {
-		limit := now.Add(-20 * time.Second).Truncate(time.Minute)
+	sealThrough := func(limit time.Time) {
 		for m := lastSealed.Add(time.Minute); !m.After(limit); m = m.Add(time.Minute) {
 			for _, tok := range tokens {
 				ok := false
@@ -326,15 +325,30 @@ func collect(
 			lastSealed = m
 		}
 	}
+	// A minute may only be sealed once the clock is a whole minute past its
+	// start, plus the grace period for late trades. internal/service carries
+	// the same `-time.Minute` and the same reason: truncating `now - grace`
+	// alone seals minute m at m+20s, a third of the way into a minute that is
+	// still filling, and every trade arriving after that is rejected as too
+	// late. With two confirmations on a 12-second chain no trade can ever
+	// arrive sooner than that, which is why this measurement reported exactly
+	// $0 for ethereum while the chain was demonstrably trading.
+	seal := func(now time.Time) {
+		sealThrough(sealLimit(now, sealGrace))
+	}
+	// On the way out every elapsed minute is sealed, grace period or not:
+	// leaving the last two unsealed would drop them from the sum while the
+	// reference volume still covers the whole window.
+	flush := func() { sealThrough(time.Now().UTC().Truncate(time.Minute)) }
 
 	for {
 		select {
 		case <-ctx.Done():
-			seal(time.Now().UTC())
+			flush()
 			return
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				seal(time.Now().UTC())
+				flush()
 				return
 			}
 			for _, src := range srcs {
@@ -422,14 +436,30 @@ func reportCoverage(
 	}
 
 	fmt.Println()
-	if len(tokens) > 0 {
-		_, healthy, sealed := engine.Sum(tokens[0].Key(), start, end)
+	// One token per line, not just the first: a chain whose source never came
+	// up looks identical to a quiet token in the table above, and the two need
+	// very different responses.
+	for _, tok := range tokens {
+		_, healthy, sealed := engine.Sum(tok.Key(), start, end)
 		if sealed > 0 && healthy < sealed {
-			fmt.Printf("⚠ %d of %d minutes were MISSING and are excluded from the sums above. "+
-				"A coverage ratio measured over a partially covered window understates the pipeline "+
-				"rather than the sources — rerun once ingestion is stable.\n\n", sealed-healthy, sealed)
+			fmt.Printf("⚠ %s: %d of %d minutes were MISSING and are excluded from its sum. "+
+				"A ratio measured over a partly covered window understates the pipeline rather "+
+				"than the sources — rerun once that chain's ingestion is stable.\n",
+				label(tok), sealed-healthy, sealed)
 		}
 	}
+
+	// Where a zero came from matters. Trades that never decoded and trades
+	// that decoded but missed the seal deadline read the same in the table and
+	// have nothing else in common.
+	st := engine.Stats()
+	fmt.Printf("\nIngestion: %d accepted, %d rejected as too late, %d duplicates.\n",
+		st.Accepted, st.TooLate, st.Duplicate)
+	if st.TooLate > st.Accepted/4 {
+		fmt.Println("A too-late count this large is a timing fault, not a coverage one: the trades")
+		fmt.Println("were decoded and then dropped because their minute was already sealed.")
+	}
+	fmt.Println()
 	fmt.Println("Neither reference is ground truth: both are indexers with their own gaps, so a")
 	fmt.Println("ratio above 100% means the on-chain pipeline saw pools that indexer did not.")
 	return nil
@@ -522,4 +552,22 @@ func reportUnpollable(res service.DiscoveryResult) {
 	for _, p := range rows {
 		fmt.Printf("| %s | %s | `%s` | %s |\n", p.Chain, p.DEX, p.Address, usdOrDash(p.Volume24hUSD))
 	}
+}
+
+// sealGrace is how long after a minute ends we still accept trades for it.
+// internal/service reads the same value from SEAL_DELAY; the measurement has no
+// settings file, so it is fixed here.
+const sealGrace = 20 * time.Second
+
+// sealLimit is the newest minute that may be sealed at wall-clock now.
+//
+// The extra minute is the whole point. Without it, truncating `now - grace`
+// yields the minute now is inside, so minute m gets sealed at m+grace — while
+// m is still filling — and every trade that arrives with any source lag is
+// refused as too late. Two confirmations on a 12-second chain are already
+// longer than the grace period, so that version measured exactly $0 on
+// ethereum against a chain that was plainly trading. internal/service carries
+// the same correction, with the same comment.
+func sealLimit(now time.Time, grace time.Duration) time.Time {
+	return now.Add(-grace).Add(-time.Minute).Truncate(time.Minute)
 }

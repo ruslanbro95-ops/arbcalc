@@ -79,3 +79,29 @@ func TestRatioHandlesMissingReference(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestSealLimitNeverClosesAMinuteStillFilling(t *testing.T) {
+	minute := time.Date(2026, 9, 1, 12, 59, 0, 0, time.UTC)
+	grace := 20 * time.Second
+
+	// Anywhere inside 12:59, and for the whole grace period after it ends,
+	// 12:59 must stay open.
+	for _, at := range []time.Time{
+		minute,
+		minute.Add(20 * time.Second),
+		minute.Add(59 * time.Second),
+		minute.Add(time.Minute),
+		minute.Add(time.Minute + 19*time.Second),
+	} {
+		if got := sealLimit(at, grace); !got.Before(minute) {
+			t.Errorf("at %s the limit is %s, which seals a minute that is still filling",
+				at.Format("15:04:05"), got.Format("15:04"))
+		}
+	}
+
+	// Once the grace period is up, it must close — otherwise nothing is ever
+	// measured.
+	if got := sealLimit(minute.Add(time.Minute+20*time.Second), grace); !got.Equal(minute) {
+		t.Errorf("limit = %s, want %s once the grace period is up", got.Format("15:04"), minute.Format("15:04"))
+	}
+}
