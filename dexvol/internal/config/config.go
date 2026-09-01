@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ruslanbro95-ops/arbcalc/dexvol/internal/domain"
@@ -82,6 +83,13 @@ func DefaultRuntime() Runtime {
 // owner id: without an owner the bot would accept commands from anyone, and
 // this bot is the control panel for the whole service.
 func LoadStatic() (Static, error) {
+	// A file beside the binary is how an unattended start gets its settings:
+	// systemd could use EnvironmentFile, but Windows Task Scheduler has no
+	// equivalent. Real environment variables still win over it.
+	if err := LoadEnvFile(""); err != nil {
+		return Static{}, fmt.Errorf("read env file: %w", err)
+	}
+
 	s := Static{
 		TelegramToken:     os.Getenv("TELEGRAM_BOT_TOKEN"),
 		StatePath:         envStr("STATE_PATH", "state.json"),
@@ -118,8 +126,16 @@ func LoadStatic() (Static, error) {
 
 // Store holds the runtime settings and persists every change, so a restart
 // keeps the owner's threshold, cooldown and watch list.
+//
+// It is guarded because it is genuinely shared: the bot goroutine writes to it
+// whenever the owner sends /threshold or /windows, while the seal, price,
+// discovery and backfill loops all read it. Unsynchronised, that is not merely
+// a stale read — Runtime carries a map, and Go aborts the whole process on a
+// concurrent map read and write. A single /windows command at the wrong
+// instant would take the monitor down.
 type Store struct {
 	path string
+	mu   sync.RWMutex
 	rt   Runtime
 }
 
@@ -147,13 +163,23 @@ func (s *Store) Load() error {
 	if rt.EscalationFactor <= 1 {
 		rt.EscalationFactor = DefaultRuntime().EscalationFactor
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.rt = rt
 	return nil
 }
 
-// Save writes through a temporary file so a crash mid-write cannot leave the
-// owner's settings truncated.
+// Save writes the current settings to disk.
 func (s *Store) Save() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.saveLocked()
+}
+
+// saveLocked writes through a temporary file so a crash mid-write cannot leave
+// the owner's settings truncated. The caller must hold the lock.
+func (s *Store) saveLocked() error {
 	b, err := json.MarshalIndent(s.rt, "", "  ")
 	if err != nil {
 		return err
@@ -165,8 +191,12 @@ func (s *Store) Save() error {
 	return os.Rename(tmp, s.path)
 }
 
-// Get returns a copy; callers cannot mutate the store by holding the result.
+// Get returns a deep copy, so a caller holding the result can neither mutate
+// the store nor observe it changing underneath them mid-decision.
 func (s *Store) Get() Runtime {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	cp := s.rt
 	cp.Tokens = append([]domain.Token(nil), s.rt.Tokens...)
 	cp.Windows = make(map[int]bool, len(s.rt.Windows))
@@ -176,10 +206,15 @@ func (s *Store) Get() Runtime {
 	return cp
 }
 
-// Update applies fn to the settings and persists the result.
+// Update applies fn to the settings and persists the result atomically: no
+// reader can see the change half-applied, and two concurrent updates cannot
+// interleave.
 func (s *Store) Update(fn func(*Runtime)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	fn(&s.rt)
-	return s.Save()
+	return s.saveLocked()
 }
 
 func envStr(key, def string) string {

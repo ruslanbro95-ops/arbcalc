@@ -248,3 +248,17 @@ func parseHexUint(s string) (uint64, error) {
 	}
 	return v.Uint64(), nil
 }
+
+// ChainID returns the endpoint's advertised chain id.
+//
+// Preflight uses it to catch the mistake no other check would: an RPC_* variable
+// pointing at a perfectly healthy node for the wrong network. Nothing
+// downstream would error — the service would just poll the wrong chain forever
+// and report that the token has no trades.
+func (r *RPC) ChainID(ctx context.Context) (uint64, error) {
+	var hexNum string
+	if err := r.Call(ctx, "eth_chainId", []any{}, &hexNum); err != nil {
+		return 0, err
+	}
+	return parseHexUint(hexNum)
+}

@@ -3,3 +3,11 @@
 *.db-wal
 *.db-shm
 .env
+dexvol.env
+*.env
+!deploy/dexvol.env.example
+
+/monitor
+/doctor
+/coverage
+*.exe

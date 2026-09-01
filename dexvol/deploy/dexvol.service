@@ -1,0 +1,48 @@
+# systemd unit for the DEX volume monitor.
+#
+# Install with deploy/install-linux.sh, which fills in the user and paths.
+
+[Unit]
+Description=DEX Volume Anomaly Monitor
+Documentation=https://github.com/ruslanbro95-ops/arbcalc
+# Wants= rather than only After=: the monitor's first action is to reach three
+# APIs, and starting before the network is actually routable just means a first
+# minute of avoidable failures.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/monitor
+
+# The whole point of running under systemd: come back from a crash, and come
+# back after a reboot.
+Restart=always
+RestartSec=10s
+# Never give up. The usual burst limit would stop restarting after a handful of
+# rapid failures, which for a monitor means going quiet exactly when something
+# is wrong — the one outcome worth avoiding.
+StartLimitIntervalSec=0
+
+# Ordinary shutdown: the service traps SIGTERM and closes its files.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dexvol
+
+# The service needs nothing but its own directory and outbound HTTPS.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__DIR__
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

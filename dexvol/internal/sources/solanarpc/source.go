@@ -505,3 +505,12 @@ func (s *Source) Cursor(pool string) string {
 	defer s.mu.RUnlock()
 	return s.cursor[strings.TrimSpace(pool)]
 }
+
+// Slot returns the node's current slot, used by preflight as a liveness probe.
+func (r *RPC) Slot(ctx context.Context) (uint64, error) {
+	var slot uint64
+	if err := r.call(ctx, "getSlot", []any{map[string]any{"commitment": "confirmed"}}, &slot); err != nil {
+		return 0, err
+	}
+	return slot, nil
+}
