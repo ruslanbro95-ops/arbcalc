@@ -205,7 +205,7 @@ func checkAggregators(ctx context.Context, r *report) {
 		switch {
 		case info.GeckoTerminalID == "":
 			r.warn(group, name, "not configured",
-				"this chain runs on one discovery provider and cannot backfill history; find its id in the list above and add it to internal/domain/chains.go")
+				"this chain runs on one discovery provider and cannot backfill history; run `coverage -list-networks "+string(info.Chain)+"` to see whether the provider indexes it under another name")
 		case known[info.GeckoTerminalID] != "":
 			r.ok(group, name, fmt.Sprintf("%s — %s", info.GeckoTerminalID, known[info.GeckoTerminalID]))
 		default:

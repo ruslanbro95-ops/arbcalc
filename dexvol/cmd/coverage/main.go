@@ -57,12 +57,17 @@ func run() error {
 		pollInterval   = flag.Duration("poll", 12*time.Second, "how often to poll for trades")
 		verifyNetworks = flag.Bool("verify-networks", false,
 			"check the chain registry's GeckoTerminal ids against the live network list and exit")
+		listNetworks = flag.String("list-networks", "",
+			"print every GeckoTerminal network whose id or name contains this text, then exit; pass \"all\" for the whole list")
 		verbose = flag.Bool("v", false, "debug logging")
 	)
 	flag.Parse()
 
 	if *verifyNetworks {
 		return runVerifyNetworks()
+	}
+	if *listNetworks != "" {
+		return runListNetworks(*listNetworks)
 	}
 
 	tokens, err := parseTokens(*tokensFlag)
@@ -160,6 +165,42 @@ func runVerifyNetworks() error {
 		return fmt.Errorf("%d network id(s) invalid", problems)
 	}
 	fmt.Println("\nEvery configured id resolves.")
+	return nil
+}
+
+// runListNetworks prints the provider's networks, filtered.
+//
+// It exists to answer one recurring question: is a chain the registry has no
+// id for actually indexed, just under a name we did not guess? Preflight can
+// say an id is missing but not what the right one would be, and 247 networks
+// is too many to eyeball.
+func runListNetworks(filter string) error {
+	live, err := geckoterminal.New().Networks(context.Background(), 20)
+	if err != nil {
+		return fmt.Errorf("fetch network list: %w", err)
+	}
+
+	needle := strings.ToLower(strings.TrimSpace(filter))
+	all := needle == "all"
+
+	fmt.Printf("GeckoTerminal lists %d networks.\n\n", len(live))
+	shown := 0
+	for _, n := range live {
+		if !all &&
+			!strings.Contains(strings.ToLower(n.ID), needle) &&
+			!strings.Contains(strings.ToLower(n.Name), needle) {
+			continue
+		}
+		fmt.Printf("  %-28s %s\n", n.ID, n.Name)
+		shown++
+	}
+
+	if shown == 0 {
+		fmt.Printf("Nothing matched %q. The provider does not appear to index it,\n"+
+			"so that chain keeps one discovery provider and no history backfill.\n", filter)
+		return nil
+	}
+	fmt.Printf("\n%d match(es). Put the id in chainRegistry in internal/domain/chains.go.\n", shown)
 	return nil
 }
 
