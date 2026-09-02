@@ -43,6 +43,7 @@ func commandMenu() []Command {
 		{Command: "settings", Description: "текущая конфигурация"},
 		{Command: "threshold", Description: "порог срабатывания в процентах"},
 		{Command: "cooldown", Description: "анти-спам в минутах"},
+		{Command: "minvolume", Description: "минимальный объём минуты в USD"},
 		{Command: "chains", Description: "поддерживаемые сети"},
 		{Command: "chatid", Description: "id текущего чата, для настройки группы"},
 		{Command: "help", Description: "все команды"},
@@ -139,6 +140,11 @@ func (b *Bot) settingsScreen() (string, [][]InlineButton) {
 			{Text: "−1м", Data: cbSet + "cd:-1"},
 			{Text: fmt.Sprintf("кулдаун %dм", rt.CooldownMinutes), Data: cbNoop + "cd"},
 			{Text: "+1м", Data: cbSet + "cd:+1"},
+		},
+		{
+			{Text: "÷2", Data: cbSet + "minvol:half"},
+			{Text: "мин. объём " + alert.FormatUSD(rt.MinVolumeUSD), Data: cbNoop + "minvol"},
+			{Text: "×2", Data: cbSet + "minvol:double"},
 		},
 		backRow(),
 	}
@@ -248,6 +254,8 @@ func (b *Bot) answerNoop(ctx context.Context, q *CallbackQuery, what string) {
 	case "thr":
 		msg = fmt.Sprintf("Порог: +%.0f%%", rt.ThresholdPct)
 	case "cd":
+	case "minvol":
+		msg = "Минимальный объём минуты: " + alert.FormatUSD(rt.MinVolumeUSD)
 		msg = fmt.Sprintf("Кулдаун: %d мин", rt.CooldownMinutes)
 	case "muted":
 		msg = "Уже заглушено"
@@ -280,6 +288,27 @@ func (b *Bot) applySetting(ctx context.Context, q *CallbackQuery, spec string) {
 		}
 		if err := b.store.Update(func(rt *config.Runtime) {
 			rt.ThresholdPct = clampFloat(rt.ThresholdPct+float64(n), 1, 100000)
+		}); err != nil {
+			note = "не сохранилось"
+		}
+	case "minvol":
+		if err := b.store.Update(func(rt *config.Runtime) {
+			switch delta {
+			case "double":
+				if rt.MinVolumeUSD <= 0 {
+					rt.MinVolumeUSD = 100
+				} else {
+					rt.MinVolumeUSD *= 2
+				}
+			case "half":
+				rt.MinVolumeUSD = clampFloat(rt.MinVolumeUSD/2, 0, 1e12)
+				if rt.MinVolumeUSD < 50 {
+					// Below this the floor stops filtering anything, so the
+					// step lands on "off" rather than on a number that only
+					// looks like a setting.
+					rt.MinVolumeUSD = 0
+				}
+			}
 		}); err != nil {
 			note = "не сохранилось"
 		}

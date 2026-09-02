@@ -86,6 +86,9 @@ type Runtime struct {
 	// through. Without it a $10k anomaly would mask a $10M one for the whole
 	// cooldown window.
 	EscalationFactor float64 `json:"escalation_factor"`
+	// MinVolumeUSD is the floor a minute must clear before its percentage is
+	// treated as a signal. See detect.Detector for why it exists.
+	MinVolumeUSD float64 `json:"min_volume_usd"`
 	// Windows enables or disables each baseline.
 	Windows map[int]bool `json:"windows"`
 	// Muted suppresses one token's alerts until the given time, keyed by
@@ -107,6 +110,7 @@ func DefaultRuntime() Runtime {
 		ThresholdPct:     30,
 		CooldownMinutes:  5,
 		EscalationFactor: 1.5,
+		MinVolumeUSD:     1000,
 		Windows: map[int]bool{
 			10:      true,
 			30:      true,

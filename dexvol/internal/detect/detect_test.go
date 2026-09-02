@@ -117,3 +117,39 @@ func TestBackfilledCountReachesTheResult(t *testing.T) {
 		t.Fatalf("backfilled = %d, want 90", res.Primary.Backfilled)
 	}
 }
+
+func TestMinVolumeFloorRejectsTinyMinutes(t *testing.T) {
+	snap := volume.Snapshot{
+		Current: volume.Bucket{Total: 222, Quality: volume.QualityOK},
+		Baselines: map[int]volume.Baseline{
+			volume.Window10m: {Median: 7, Samples: 10, Usable: true},
+		},
+	}
+	d := Detector{ThresholdPct: 30, MinVolumeUSD: 1000, Windows: map[int]bool{volume.Window10m: true}}
+
+	res := d.Evaluate(domain.Token{Symbol: "ABC", Chain: domain.ChainBase}, snap)
+	if res.Anomalous {
+		t.Fatalf("$222 against a $7 median reported as anomalous at %.0f%%", res.Primary.Pct)
+	}
+
+	// With the floor off, the same input is judged — the check is a floor,
+	// not a rewrite of the arithmetic.
+	d.MinVolumeUSD = 0
+	if res := d.Evaluate(domain.Token{Symbol: "ABC"}, snap); !res.Anomalous {
+		t.Fatal("with no floor the percentage must still be evaluated")
+	}
+}
+
+func TestMinVolumeFloorLetsRealVolumeThrough(t *testing.T) {
+	snap := volume.Snapshot{
+		Current: volume.Bucket{Total: 200000, Quality: volume.QualityOK},
+		Baselines: map[int]volume.Baseline{
+			volume.Window10m: {Median: 5000, Samples: 10, Usable: true},
+		},
+	}
+	d := Detector{ThresholdPct: 30, MinVolumeUSD: 1000, Windows: map[int]bool{volume.Window10m: true}}
+
+	if res := d.Evaluate(domain.Token{Symbol: "ABC"}, snap); !res.Anomalous {
+		t.Fatal("a $200K minute above a $5K median must alert")
+	}
+}

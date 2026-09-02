@@ -300,7 +300,7 @@ func (s *Service) sealMinute(ctx context.Context, rt config.Runtime, minute time
 
 // judge runs the detector and the alert policy for one sealed minute.
 func (s *Service) judge(ctx context.Context, rt config.Runtime, tok domain.Token, snap volume.Snapshot) {
-	det := detect.Detector{ThresholdPct: rt.ThresholdPct, Windows: rt.Windows}
+	det := detect.Detector{ThresholdPct: rt.ThresholdPct, MinVolumeUSD: rt.MinVolumeUSD, Windows: rt.Windows}
 	res := det.Evaluate(tok, snap)
 	if !res.Anomalous {
 		return

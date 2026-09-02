@@ -43,7 +43,13 @@ func newService(t *testing.T) (*Service, *recordingNotifier, *config.Store) {
 	dir := t.TempDir()
 
 	settings := config.NewStore(filepath.Join(dir, "state.json"))
-	settings.Update(func(rt *config.Runtime) { rt.Tokens = []domain.Token{testToken} })
+	settings.Update(func(rt *config.Runtime) {
+		rt.Tokens = []domain.Token{testToken}
+		// These cases exercise the percentage logic with tidy round numbers in
+		// the hundreds. The production floor is there to reject exactly that
+		// size, so it is off here and tested on its own.
+		rt.MinVolumeUSD = 0
+	})
 
 	db, err := store.Open(dir)
 	if err != nil {
@@ -546,5 +552,57 @@ func TestBackfillIgnoresPoolsTheLiveFeedCannotRead(t *testing.T) {
 	sol := []domain.Pool{{Chain: domain.ChainSolana, Address: "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"}}
 	if len(ingestablePools(domain.ChainSolana, sol)) != 1 {
 		t.Fatal("a non-EVM chain must keep all of its pools")
+	}
+}
+
+func TestATinyMinuteIsNotAnEventHoweverLargeThePercentage(t *testing.T) {
+	// The alert this prevents, verbatim from a live run:
+	//
+	//	#BASECAT · base
+	//	$222
+	//	Volume +3272%
+	//	30m -75%   60m -70%   24h -52%
+	//	Median: $7
+	//
+	// Every longer window was deeply negative — nothing rose. The token
+	// barely trades in the pools this pipeline can see, so its 10m median was
+	// seven dollars and one ordinary swap became a four-figure percentage.
+	svc, notifier, settings := newService(t)
+	if err := settings.Update(func(rt *config.Runtime) { rt.MinVolumeUSD = 1000 }); err != nil {
+		t.Fatal(err)
+	}
+	b := base()
+
+	for i := 1; i <= 30; i++ {
+		advance(svc, b.Add(time.Duration(i)*time.Minute), 7)
+	}
+	advance(svc, b.Add(31*time.Minute), 222)
+
+	if notifier.count() != 0 {
+		t.Fatalf("got %d alerts for a $222 minute; below the floor nothing is an event",
+			notifier.count())
+	}
+
+	// The same relative move at a size worth reading still alerts. A fresh
+	// service, because walking this one up from seven dollars to five
+	// thousand is itself a spike several times over.
+	svc2, notifier2, settings2 := newService(t)
+	if err := settings2.Update(func(rt *config.Runtime) { rt.MinVolumeUSD = 1000 }); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 30; i++ {
+		advance(svc2, b.Add(time.Duration(i)*time.Minute), 5000)
+	}
+	advance(svc2, b.Add(31*time.Minute), 200000)
+
+	if notifier2.count() != 1 {
+		t.Fatalf("got %d alerts, want 1 — the floor must not silence real volume",
+			notifier2.count())
+	}
+	advance(svc, b.Add(61*time.Minute), 200000)
+
+	if notifier.count() != 1 {
+		t.Fatalf("got %d alerts, want 1 — the floor must not silence real volume",
+			notifier.count())
 	}
 }

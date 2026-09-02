@@ -182,6 +182,8 @@ func (b *Bot) dispatch(cmd string, args []string) (string, error) {
 		return b.cmdChains()
 	case "/threshold":
 		return b.cmdThreshold(args)
+	case "/minvolume", "/minvol":
+		return b.cmdMinVolume(args)
 	case "/cooldown":
 		return b.cmdCooldown(args)
 	case "/escalation":
@@ -218,6 +220,7 @@ const helpText = `DEX Volume Anomaly Monitor
 Алерты
 /threshold [percent]      порог, например /threshold 30
 /cooldown [minutes]       подавление повторов
+/minvolume [usd]          минимальный объём минуты, ниже — не сигналим
 /escalation [factor]      во сколько раз аномалия должна усилиться
 /windows [10|30|60|24h on|off]
 /on  /off                 алерты вкл/выкл, сбор данных продолжается
@@ -605,4 +608,31 @@ func labelOf(t domain.Token) string {
 		return t.Address[:min(10, len(t.Address))] + "… · " + string(t.Chain)
 	}
 	return t.Symbol + " · " + string(t.Chain)
+}
+
+// cmdMinVolume sets the floor a minute must clear to be judged at all.
+//
+// It is the answer to the loudest kind of false positive: a token that barely
+// trades in the pools this pipeline can see, whose median is a few dollars,
+// and where one ordinary swap reads as several thousand percent while every
+// longer window is negative.
+func (b *Bot) cmdMinVolume(args []string) (string, error) {
+	if len(args) == 0 {
+		return fmt.Sprintf("min volume: %s", alert.FormatUSD(b.store.Get().MinVolumeUSD)), nil
+	}
+	raw := strings.TrimPrefix(strings.TrimSpace(args[0]), "$")
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return "", fmt.Errorf("%q is not a number", args[0])
+	}
+	if v < 0 {
+		return "", errors.New("min volume cannot be negative")
+	}
+	if err := b.store.Update(func(rt *config.Runtime) { rt.MinVolumeUSD = v }); err != nil {
+		return "", err
+	}
+	if v == 0 {
+		return "min volume off — every minute is judged, however small", nil
+	}
+	return fmt.Sprintf("min volume set to %s", alert.FormatUSD(v)), nil
 }

@@ -44,6 +44,20 @@ type Result struct {
 type Detector struct {
 	// ThresholdPct is the minimum percentage above a baseline that counts.
 	ThresholdPct float64
+	// MinVolumeUSD is the floor a minute must clear before any percentage is
+	// worth reading.
+	//
+	// A percentage against a tiny baseline is arithmetically true and
+	// practically meaningless: a $222 minute against a $7 median reads as
+	// +3272% and escalates, while the same token's 30m, 60m and 24h windows
+	// sit at -75%, -70% and -52%. Nothing rose. The token barely trades in the
+	// pools this pipeline can see, and one ordinary swap moved a number that
+	// had no business being a denominator.
+	//
+	// The floor is on the minute rather than on the median on purpose: it is
+	// the volume the alert claims happened, and it is what a person reading
+	// "$222" would judge the message by. Zero disables the check.
+	MinVolumeUSD float64
 	// Windows selects which baselines participate.
 	Windows map[int]bool
 }
@@ -56,6 +70,11 @@ func (d Detector) Evaluate(tok domain.Token, snap volume.Snapshot) Result {
 	// A minute the sources could not cover says nothing about the market, so
 	// it is never judged. Alerting on it would turn every outage into a spike.
 	if snap.Current.Quality != volume.QualityOK {
+		return res
+	}
+
+	// Too small to be an event, whatever the percentage says.
+	if d.MinVolumeUSD > 0 && snap.Current.Total < d.MinVolumeUSD {
 		return res
 	}
 
